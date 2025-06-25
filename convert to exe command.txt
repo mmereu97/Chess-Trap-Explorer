@@ -1,0 +1,5 @@
+pyinstaller --onefile --noconsole --icon=icon2.ico --add-data "pieces;pieces" --add-data "traps.xlsx;." --hidden-import=pygame --hidden-import=chess --hidden-import=pandas --hidden-import=openpyxl --hidden-import=pyperclip --hidden-import=pygame_textinput --collect-all pygame chess_trap_explorer.py
+
+
+** iconita trebuie sa fie si in foldereul de unde se lanseaza comanda
+
