@@ -1,0 +1,32 @@
+B claude are 
+
+-adaugare importuri
+
+inlocuire 
+- def _parse_pgn_file
+- def import_from_folder
+
+adaugare 
+- def _process_games_chunk
+
+
+
+din momentul asta scanarea e mai rapida
+
+C are 
+
+ilocuire 
+- def import_traps
+ilocuire
+- def import_from_file
+
+
+din momentul asta dupa scanare, scriere in baza de date e mai rapida dar predispusa si la erori
+
+
+B Claude Gemini.py
+
+-adaugare importuri
+
+inlocuire
+def _process_games_chunk
