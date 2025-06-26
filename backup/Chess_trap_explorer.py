@@ -283,6 +283,23 @@ class TrapRepository:
             conn.executemany("UPDATE traps SET color = ? WHERE id = ?", updates)
             conn.commit()
 
+    def get_trap_counts_by_color(self) -> Tuple[int, int]:
+        """Returns the number of traps for White and Black."""
+        white_count = 0
+        black_count = 0
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                # chess.WHITE este True (1), chess.BLACK este False (0)
+                cursor = conn.execute("SELECT color, COUNT(*) FROM traps GROUP BY color")
+                for color, count in cursor.fetchall():
+                    if color == 1: # White
+                        white_count = count
+                    else: # Black
+                        black_count = count
+        except sqlite3.Error as e:
+            print(f"[DB ERROR] Could not get trap counts: {e}")
+        return white_count, black_count
+
 # Service Layer
 class TrapService:
     """
@@ -313,7 +330,10 @@ class TrapService:
         end_time = time.time()
         print(f"[TRAP SERVICE] Initialization complete in {end_time - start_time:.4f} seconds.")
         if self.all_traps:
-            print(f"               Using index for {len(self.all_traps)} traps across {len(self.position_index)} unique positions.")
+            # --- AICI ESTE MODIFICAREA ---
+            trap_count_formatted = f"{len(self.all_traps):_}".replace("_", " ")
+            position_count_formatted = f"{len(self.position_index):_}".replace("_", " ")
+            print(f"               Using index for {trap_count_formatted} traps across {position_count_formatted} unique positions.")
 
     def _load_index_from_cache(self) -> bool:
         """
@@ -432,14 +452,37 @@ class TrapService:
 
     def get_aggregated_suggestions(self, game_state: GameState) -> List[MoveSuggestion]:
         """Obține sugestii agregate folosind noul index de poziții."""
+        # Verifică dacă este rândul jucătorului uman să mute
         if game_state.board.turn != game_state.current_player:
             return []
+
+        # Logică specială pentru poziția de start (fără mutări în istoric)
+        if not game_state.move_history:
+            move_groups = defaultdict(list)
+            player_color_at_turn = game_state.board.turn
             
+            for trap in self.all_traps:
+                # Verificăm dacă trap-ul este pentru culoarea care e la mutare
+                if trap.color == player_color_at_turn and trap.moves:
+                    first_move = trap.moves[0]
+                    move_groups[first_move].append(trap.moves)
+            
+            suggestions = []
+            for move_san, continuations in move_groups.items():
+                suggestions.append(MoveSuggestion(
+                    suggested_move=move_san,
+                    trap_count=len(continuations),
+                    example_trap_line=continuations[0]
+                ))
+            
+            suggestions.sort(key=lambda s: s.trap_count, reverse=True)
+            return suggestions
+            
+        # Logica existentă pentru pozițiile de după prima mutare (folosind indexul)
         matches = self._get_matches_for_current_position(game_state)
         move_groups = defaultdict(list)
         
         for trap, move_index in matches:
-            # Sugestia este următoarea mutare din linia capcanei
             if len(trap.moves) > move_index + 1:
                 next_move = trap.moves[move_index + 1]
                 move_groups[next_move].append(trap.moves[move_index + 1:])
@@ -449,7 +492,7 @@ class TrapService:
             suggestions.append(MoveSuggestion(
                 suggested_move=move_san,
                 trap_count=len(continuations),
-                example_trap_line=continuations[0] # Păstrăm un exemplu de continuare
+                example_trap_line=continuations[0]
             ))
             
         suggestions.sort(key=lambda s: s.trap_count, reverse=True)
@@ -657,10 +700,9 @@ class PGNImportService:
 
 @dataclass
 class OpeningInfo:
-    """Informații despre o deschidere."""
+    """Informații despre o deschidere, citite din baza de date."""
     name: str
     eco_code: str
-    category: str  # "Open", "Semi-Open", "Closed", "Indian", "Flank", etc.
   
 class DatabaseAuditor:
     """
@@ -740,87 +782,52 @@ class DatabaseAuditor:
         return report, changes_made
 
 class OpeningDatabase:
-    """Bază de date eficientă pentru deschideri, cu un dicționar îmbogățit."""
+    """Bază de date eficientă pentru deschideri, folosind SQLite."""
     
-    def __init__(self):
-        # Folosim un dicționar unde cheia este tuple de mutări
-        self.openings: Dict[Tuple[str, ...], OpeningInfo] = {}
-        self._load_openings()
-        print(f"[DEBUG INIT] Opening database loaded with {len(self.openings)} entries.")
-        
-    def _load_openings(self):
-        """Încarcă toate deschiderile. Organizat pe categorii pentru claritate."""
-        
-        # --- DESCHIDERI DESCHISE (1.e4 e5) ---
-        self.openings[("e4", "e5")] = OpeningInfo("King's Pawn Game", "C20", "Open")
-        self.openings[("e4", "e5", "Nf3")] = OpeningInfo("King's Knight Opening", "C40", "Open")
-        self.openings[("e4", "e5", "Nf3", "Nc6")] = OpeningInfo("Italian/Spanish Base", "C44", "Open")
-        self.openings[("e4", "e5", "Nf3", "Nc6", "Bb5")] = OpeningInfo("Spanish (Ruy Lopez)", "C60", "Open")
-        self.openings[("e4", "e5", "Nf3", "Nc6", "Bb5", "a6")] = OpeningInfo("Spanish: Morphy Defense", "C70", "Open")
-        self.openings[("e4", "e5", "Nf3", "Nc6", "Bb5", "a6", "Ba4", "Nf6")] = OpeningInfo("Spanish: Closed", "C78", "Open")
-        self.openings[("e4", "e5", "Nf3", "Nc6", "Bc4")] = OpeningInfo("Italian Game", "C50", "Open")
-        self.openings[("e4", "e5", "Nf3", "Nc6", "Bc4", "Bc5")] = OpeningInfo("Italian: Giuoco Piano", "C53", "Open")
-        self.openings[("e4", "e5", "Nf3", "Nc6", "Bc4", "Nf6")] = OpeningInfo("Italian: Two Knights", "C55", "Open")
-        self.openings[("e4", "e5", "Nf3", "Nc6", "Bc4", "Nf6", "Ng5", "d5", "exd5", "Na5")] = OpeningInfo("Two Knights: Polerio", "C58", "Open")
-        self.openings[("e4", "e5", "Nf3", "Nc6", "Bc4", "Nf6", "Ng5", "d5", "exd5", "Nxd5", "Nxf7")] = OpeningInfo("Fried Liver Attack!", "C57", "Open")
-        self.openings[("e4", "e5", "Nf3", "Nc6", "d4")] = OpeningInfo("Scotch Game", "C44", "Open")
-        self.openings[("e4", "e5", "Nf3", "Nc6", "d4", "exd4", "c3")] = OpeningInfo("Scotch Gambit", "C44", "Open")
-        self.openings[("e4", "e5", "Nf3", "Nf6")] = OpeningInfo("Petrov's Defense", "C42", "Open")
-        self.openings[("e4", "e5", "Nc3")] = OpeningInfo("Vienna Game", "C25", "Open")
-        self.openings[("e4", "e5", "f4")] = OpeningInfo("King's Gambit", "C30", "Open")
-        self.openings[("e4", "e5", "f4", "exf4")] = OpeningInfo("King's Gambit Accepted", "C33", "Open")
-        self.openings[("e4", "e5", "f4", "d5")] = OpeningInfo("King's Gambit Declined", "C30", "Open")
-
-        # --- DESCHIDERI SEMI-DESCHISE (1.e4 altceva) ---
-        self.openings[("e4", "c5")] = OpeningInfo("Sicilian Defense", "B20", "Semi-Open")
-        self.openings[("e4", "c5", "Nf3", "d6", "d4", "cxd4", "Nxd4", "Nf6", "Nc3", "a6")] = OpeningInfo("Sicilian: Najdorf", "B90", "Semi-Open")
-        self.openings[("e4", "c5", "Nf3", "d6", "d4", "cxd4", "Nxd4", "Nf6", "Nc3", "g6")] = OpeningInfo("Sicilian: Dragon", "B70", "Semi-Open")
-        self.openings[("e4", "c5", "Nf3", "Nc6", "d4", "cxd4", "Nxd4", "Nf6", "Nc3", "e5")] = OpeningInfo("Sicilian: Sveshnikov", "B33", "Semi-Open")
-        self.openings[("e4", "c5", "Nf3", "Nc6", "Bb5")] = OpeningInfo("Sicilian: Rossolimo", "B31", "Semi-Open")
-        self.openings[("e4", "c5", "Nc3")] = OpeningInfo("Sicilian: Closed", "B23", "Semi-Open")
-        self.openings[("e4", "c5", "c3")] = OpeningInfo("Sicilian: Alapin", "B22", "Semi-Open")
-        self.openings[("e4", "e6")] = OpeningInfo("French Defense", "C00", "Semi-Open")
-        self.openings[("e4", "e6", "d4", "d5")] = OpeningInfo("French Defense", "C00", "Semi-Open")
-        self.openings[("e4", "e6", "d4", "d5", "e5")] = OpeningInfo("French: Advance", "C02", "Semi-Open")
-        self.openings[("e4", "e6", "d4", "d5", "Nc3", "Bb4")] = OpeningInfo("French: Winawer", "C15", "Semi-Open")
-        self.openings[("e4", "e6", "d4", "d5", "Nd2")] = OpeningInfo("French: Tarrasch", "C03", "Semi-Open")
-        self.openings[("e4", "e6", "d4", "d5", "exd5")] = OpeningInfo("French: Exchange", "C01", "Semi-Open")
-        self.openings[("e4", "c6")] = OpeningInfo("Caro-Kann Defense", "B10", "Semi-Open")
-        self.openings[("e4", "c6", "d4", "d5", "e5")] = OpeningInfo("Caro-Kann: Advance", "B12", "Semi-Open")
-        self.openings[("e4", "c6", "d4", "d5", "Nc3", "dxe4", "Nxe4", "Bf5")] = OpeningInfo("Caro-Kann: Classical", "B18", "Semi-Open")
-        
-        # --- DESCHIDERI ÎNCHISE & INDIENE (1.d4) ---
-        self.openings[("d4", "d5")] = OpeningInfo("Queen's Pawn Game", "D00", "Closed")
-        self.openings[("d4", "d5", "c4")] = OpeningInfo("Queen's Gambit", "D06", "Closed")
-        self.openings[("d4", "d5", "c4", "e6")] = OpeningInfo("Queen's Gambit Declined", "D30", "Closed")
-        self.openings[("d4", "d5", "c4", "e6", "Nc3", "Nf6", "cxd5", "exd5", "Bg5")] = OpeningInfo("QGD: Exchange, Main Line", "D35", "Closed")
-        self.openings[("d4", "d5", "c4", "e6", "Nc3", "c5")] = OpeningInfo("QGD: Tarrasch Defense", "D32", "Closed")
-        self.openings[("d4", "d5", "c4", "dxc4")] = OpeningInfo("Queen's Gambit Accepted", "D20", "Closed")
-        self.openings[("d4", "d5", "c4", "c6")] = OpeningInfo("Slav Defense", "D10", "Closed")
-        self.openings[("d4", "d5", "Nf3", "Nf6", "Bf4")] = OpeningInfo("London System", "D02", "Closed")
-        self.openings[("d4", "f5")] = OpeningInfo("Dutch Defense", "A80", "Indian")
-        
-        self.openings[("d4", "Nf6")] = OpeningInfo("Indian Defense", "A45", "Indian")
-        self.openings[("d4", "Nf6", "c4", "e6", "Nc3", "Bb4")] = OpeningInfo("Nimzo-Indian Defense", "E20", "Indian")
-        self.openings[("d4", "Nf6", "c4", "e6", "Nf3", "b6")] = OpeningInfo("Queen's Indian Defense", "E12", "Indian")
-        self.openings[("d4", "Nf6", "c4", "g6", "Nc3", "d5")] = OpeningInfo("Grünfeld Defense", "D80", "Indian")
-        self.openings[("d4", "Nf6", "c4", "g6", "Nc3", "Bg7", "e4", "d6")] = OpeningInfo("King's Indian Defense", "E90", "Indian")
-        
-        # --- DESCHIDERI FLANK ---
-        self.openings[("c4",)] = OpeningInfo("English Opening", "A10", "Flank")
-        self.openings[("c4", "e5")] = OpeningInfo("English: King's English", "A20", "Flank")
-        self.openings[("c4", "c5")] = OpeningInfo("English: Symmetrical", "A30", "Flank")
-        self.openings[("Nf3",)] = OpeningInfo("Réti Opening", "A04", "Flank")
-        self.openings[("Nf3", "d5", "g3")] = OpeningInfo("Réti: King's Indian Attack", "A07", "Flank")
+    def __init__(self, db_path: str = "openings.db"):
+        self.db_path = db_path
+        if not os.path.exists(self.db_path):
+            print(f"[ERROR] Opening database file not found: {self.db_path}")
+            print("[ERROR] Please run build_opening_book.py first to create it.")
+            self.conn = None
+        else:
+            try:
+                # Deschidem în mod "immutable" (read-only) pentru siguranță și viteză
+                db_uri = f"file:{self.db_path}?mode=ro"
+                self.conn = sqlite3.connect(db_uri, uri=True, check_same_thread=False)
+                cursor = self.conn.cursor()
+                cursor.execute("SELECT COUNT(*) FROM openings")
+                count = cursor.fetchone()[0]
+                print(f"[DEBUG INIT] Connection to opening book '{self.db_path}' successful. Found {count} entries.")
+            except sqlite3.Error as e:
+                print(f"[ERROR] Could not connect to opening book database: {e}")
+                self.conn = None
 
     def get_opening_name(self, moves: List[str]) -> Optional[OpeningInfo]:
-        """Găsește cea mai specifică deschidere pentru o listă de mutări."""
-        for length in range(len(moves), 0, -1):
-            move_tuple = tuple(moves[:length])
-            if move_tuple in self.openings:
-                return self.openings[move_tuple]
-        return None
-        
+        """Găsește cea mai specifică deschidere pentru o listă de mutări printr-o interogare SQL."""
+        if not self.conn or not moves:
+            return None
+            
+        try:
+            cursor = self.conn.cursor()
+            for length in range(len(moves), 0, -1):
+                current_sequence = moves[:length]
+                moves_json = json.dumps(current_sequence)
+                
+                cursor.execute(
+                    "SELECT name, eco_code FROM openings WHERE moves_json = ?",
+                    (moves_json,)
+                )
+                result = cursor.fetchone()
+                
+                if result:
+                    return OpeningInfo(name=result[0], eco_code=result[1])
+            
+            return None
+        except sqlite3.Error as e:
+            print(f"[DB ERROR] Error querying opening book: {e}")
+            return None
+
     def get_opening_phase_info(self, moves: List[str]) -> Tuple[str, str]:
         """Returnează informații despre faza jocului pentru fiecare parte."""
         opening_info = self.get_opening_name(moves)
@@ -829,15 +836,23 @@ class OpeningDatabase:
             if not moves:
                 return "Starting Position", "Starting Position"
             else:
-                # Folosește ultima deschidere cunoscută dacă nu mai avem potrivire
-                # Caută din nou, dar nu returna 'None'
-                last_known = self.get_opening_name(moves[:-1])
-                if last_known:
-                    return f"{last_known.name}...", f"{last_known.name}..."
-                return "Book moves end", "Book moves end"
+                return "Out of book", "Out of book"
 
         base_text = f"{opening_info.name} ({opening_info.eco_code})"
         return base_text, base_text
+
+    def get_total_openings(self) -> int:
+        """Returns the total number of indexed opening lines."""
+        if not self.conn:
+            return 0
+        # Putem returna lungimea dicționarului pe care l-am încărcat
+        # sau, mai sigur, putem interoga direct DB-ul.
+        try:
+            cursor = self.conn.cursor()
+            cursor.execute("SELECT COUNT(id) FROM openings")
+            return cursor.fetchone()[0]
+        except sqlite3.Error:
+            return 0
 
 class SettingsService:
     """Service for managing application settings."""
@@ -986,39 +1001,43 @@ class Renderer:
         # Color buttons
         button_width, button_height = 300, 50
         center_x = self.config.WIDTH // 2
+        y_pos = 250
         
-        # White button
-        white_rect = pygame.Rect(center_x - button_width // 2, 250, button_width, button_height)
+        white_rect = pygame.Rect(center_x - button_width // 2, y_pos, button_width, button_height)
         white_color = (100, 100, 100) if selected_color == chess.WHITE else (70, 70, 70)
-        pygame.draw.rect(surface, white_color, white_rect)
-        pygame.draw.rect(surface, self.config.BORDER_COLOR, white_rect, 2)
-        
+        pygame.draw.rect(surface, white_color, white_rect, border_radius=5)
+        pygame.draw.rect(surface, self.config.BORDER_COLOR, white_rect, 2, border_radius=5)
         white_text = self.font.render("Play as White", True, self.config.TEXT_COLOR)
-        white_text_rect = white_text.get_rect(center=white_rect.center)
-        surface.blit(white_text, white_text_rect)
+        surface.blit(white_text, white_text.get_rect(center=white_rect.center))
         button_rects["white"] = white_rect
-        
-        # Black button
-        black_rect = pygame.Rect(center_x - button_width // 2, 310, button_width, button_height)
+        y_pos += 60
+
+        black_rect = pygame.Rect(center_x - button_width // 2, y_pos, button_width, button_height)
         black_color = (100, 100, 100) if selected_color == chess.BLACK else (70, 70, 70)
-        pygame.draw.rect(surface, black_color, black_rect)
-        pygame.draw.rect(surface, self.config.BORDER_COLOR, black_rect, 2)
-        
+        pygame.draw.rect(surface, black_color, black_rect, border_radius=5)
+        pygame.draw.rect(surface, self.config.BORDER_COLOR, black_rect, 2, border_radius=5)
         black_text = self.font.render("Play as Black", True, self.config.TEXT_COLOR)
-        black_text_rect = black_text.get_rect(center=black_rect.center)
-        surface.blit(black_text, black_text_rect)
+        surface.blit(black_text, black_text.get_rect(center=black_rect.center))
         button_rects["black"] = black_rect
-        
+        y_pos += 80
+
         # Start button
-        start_rect = pygame.Rect(center_x - 100, 400, 200, button_height)
-        pygame.draw.rect(surface, (0, 120, 0), start_rect)
-        pygame.draw.rect(surface, self.config.BORDER_COLOR, start_rect, 2)
-        
+        start_rect = pygame.Rect(center_x - 100, y_pos, 200, button_height)
+        pygame.draw.rect(surface, (0, 120, 0), start_rect, border_radius=5)
+        pygame.draw.rect(surface, self.config.BORDER_COLOR, start_rect, 2, border_radius=5)
         start_text = self.font.render("Start Game", True, self.config.TEXT_COLOR)
-        start_text_rect = start_text.get_rect(center=start_rect.center)
-        surface.blit(start_text, start_text_rect)
+        surface.blit(start_text, start_text.get_rect(center=start_rect.center))
         button_rects["start"] = start_rect
-        
+        y_pos += 80
+
+        # --- BUTON NOU: DATABASE INFO ---
+        info_rect = pygame.Rect(center_x - 125, y_pos, 250, 40)
+        pygame.draw.rect(surface, (0, 80, 120), info_rect, border_radius=5) # Albastru închis
+        pygame.draw.rect(surface, self.config.BORDER_COLOR, info_rect, 2, border_radius=5)
+        info_text = self.small_font.render("Database Info", True, self.config.TEXT_COLOR)
+        surface.blit(info_text, info_text.get_rect(center=info_rect.center))
+        button_rects["info"] = info_rect
+
         return button_rects
     
     def render_game_screen(self, surface: pygame.Surface, state: GameState, 
@@ -1242,8 +1261,9 @@ class Renderer:
         surface.blit(title_surface, (panel_rect.x + 10, y_offset))
         y_offset += 40
         
-        # NOU: Afișează numărul de capcane care se potrivesc
-        count_text = f"Matching traps: {total_matching_traps}"
+        # --- AICI ESTE MODIFICAREA ---
+        traps_formatted = f"{total_matching_traps:_}".replace("_", " ")
+        count_text = f"Matching traps: {traps_formatted}"
         count_surface = self.small_font.render(count_text, True, (255, 255, 0))
         surface.blit(count_surface, (panel_rect.x + 10, y_offset))
         y_offset += 30
@@ -1265,8 +1285,9 @@ class Renderer:
                 pygame.draw.rect(surface, (60, 60, 60), suggestion_rect_abs)
                 pygame.draw.rect(surface, self.config.BORDER_COLOR, suggestion_rect_abs, 1)
                 
-                # NOU: Afișează sugestia în format "1. Nf3 (150 traps)"
-                suggestion_text = f"{i+1}. {suggestion.suggested_move} ({suggestion.trap_count} traps)"
+                # Formatăm și numărul de capcane pentru fiecare sugestie
+                trap_count_formatted = f"{suggestion.trap_count:_}".replace("_", " ")
+                suggestion_text = f"{i+1}. {suggestion.suggested_move} ({trap_count_formatted} traps)"
                 text_surface = self.small_font.render(suggestion_text, True, self.config.TEXT_COLOR)
                 surface.blit(text_surface, (suggestion_rect_abs.x + 10, suggestion_rect_abs.y + 10))
                 
@@ -1554,6 +1575,36 @@ if QT_AVAILABLE:
             
             self.accept() # accept() închide dialogul cu succes
 
+    class QtInfoDialog(QDialog):
+        """A simple dialog to display database statistics."""
+        def __init__(self, stats: Dict[str, str], parent=None):
+            super().__init__(parent)
+            self.setWindowTitle("Database Statistics")
+            self.setMinimumWidth(300)
+
+            layout = QVBoxLayout(self)
+            
+            group_box = QGroupBox("Current Content")
+            group_layout = QVBoxLayout()
+            
+            for key, value in stats.items():
+                h_layout = QHBoxLayout()
+                key_label = QLabel(f"<b>{key}:</b>") # Text aldin
+                value_label = QLabel(value)
+                value_label.setAlignment(Qt.AlignmentFlag.AlignRight)
+                
+                h_layout.addWidget(key_label)
+                h_layout.addWidget(value_label)
+                group_layout.addLayout(h_layout)
+
+            group_box.setLayout(group_layout)
+            layout.addWidget(group_box)
+            
+            # Buton de OK
+            ok_button = QPushButton("OK")
+            ok_button.clicked.connect(self.accept)
+            layout.addWidget(ok_button, 0, Qt.AlignmentFlag.AlignCenter)
+
 # Main Game Controller
 class GameController:
     """Main controller that orchestrates the game."""
@@ -1692,12 +1743,10 @@ class GameController:
         print("[DEBUG MAIN] Main loop ended")
         pygame.quit()
     
-    def _handle_start_screen_click(self, pos: Tuple[int, int]) -> bool:
+    def _handle_start_screen_click(self, pos: Tuple[int, int]) -> None: # Am schimbat return type la None
         """Handle clicks on the start screen."""
-        # Render to get button positions
         button_rects = self.renderer.render_start_screen(self.screen, self.selected_color)
         
-        # Check button clicks
         action = self.input_handler.handle_button_click(pos, button_rects)
         
         if action == "white":
@@ -1706,14 +1755,13 @@ class GameController:
             self.selected_color = chess.BLACK
         elif action == "start":
             self._start_game(self.selected_color)
-        
-        return True  # Continue running
-    
+        elif action == "info": # --- CAZ NOU ---
+            self._show_database_info()
+
     def _start_game(self, color: chess.Color) -> None:
         """Start a new game with the specified color."""
         print(f"[DEBUG START] Starting game with color: {chess.COLOR_NAMES[color]}")
         
-        # Create new game state with all required attributes
         self.current_state = GameState(
             board=chess.Board(),
             current_player=color,
@@ -1731,7 +1779,11 @@ class GameController:
         print(f"[DEBUG START] Game started - Flipped: {self.flipped}")
         print(f"[DEBUG START] Initial board: {self.current_state.board.fen()}")
         
-        self._update_suggestions()
+        # --- AICI ESTE CORECȚIA ESENȚIALĂ ---
+        # Actualizăm sugestiile imediat și le stocăm în self.current_suggestions
+        # pentru a fi disponibile la prima randare a ecranului de joc.
+        self.current_suggestions = self.trap_service.get_aggregated_suggestions(self.current_state)
+        print(f"[DEBUG START] Initial suggestions loaded. Found {len(self.current_suggestions)} move options.")
 
     def _clear_database(self):
         """Handles clearing the database using a non-blocking QMessageBox from PySide6."""
@@ -2225,6 +2277,28 @@ class GameController:
         else:
             print("[CONTROLLER] Audit found no issues. No refresh needed.")
             QMessageBox.information(self.qt_app.activeWindow(), "Success", "Database is clean. No changes were made.")
+
+    def _show_database_info(self):
+        """Collects and displays database statistics in a Qt dialog."""
+        if not QT_AVAILABLE:
+            print("[INFO] Cannot show stats: PySide6 (Qt) is not available.")
+            return
+
+        # Colectează datele
+        white_traps, black_traps = self.trap_repository.get_trap_counts_by_color()
+        total_openings = self.opening_db.get_total_openings()
+        
+        # Formatează numerele pentru lizibilitate
+        stats = {
+            "White Traps": f"{white_traps:_}".replace("_", " "),
+            "Black Traps": f"{black_traps:_}".replace("_", " "),
+            "Total Traps": f"{white_traps + black_traps:_}".replace("_", " "),
+            "Indexed Openings": f"{total_openings:_}".replace("_", " ")
+        }
+        
+        # Creează și afișează dialogul
+        dialog = QtInfoDialog(stats)
+        dialog.exec()
 
 def main():
     """Main entry point."""
