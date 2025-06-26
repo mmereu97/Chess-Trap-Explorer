@@ -12,7 +12,7 @@ import time
 import pickle
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import List, Dict, Optional, Tuple, Protocol
+from typing import List, Dict, Optional, Tuple, Protocol, Any
 from pathlib import Path
 from collections import defaultdict  # <--- ADAUGĂ ACEASTĂ LINIE AICI
 from concurrent.futures import ProcessPoolExecutor, as_completed
@@ -115,6 +115,46 @@ def audit_specific_line(line_to_check: List[str], db_path="chess_traps.db"):
             
     print("\n--- AUDIT COMPLETE FOR SPECIFIC LINE ---")
 
+# --- Noul dicționar cu "amprentele" sistemelor ---
+SYSTEM_FINGERPRINTS: Dict[str, Any] = {
+    chess.WHITE: {
+        "London System": {
+            "pieces": {chess.PAWN: [chess.D4], chess.BISHOP: [chess.F4], chess.KNIGHT: [chess.F3]},
+            "description": "London System"
+        },
+        "King's Indian Attack": {
+            "pieces": {chess.KNIGHT: [chess.F3], chess.PAWN: [chess.G3, chess.D3], chess.BISHOP: [chess.G2]},
+            "description": "King's Indian Attack"
+        },
+        "Colle System": {
+            "pieces": {chess.PAWN: [chess.D4, chess.E3], chess.KNIGHT: [chess.F3]},
+            "description": "Colle System"
+        },
+        "Réti Opening": {
+            "pieces": {chess.KNIGHT: [chess.F3], chess.PAWN: [chess.C4, chess.G3]},
+            "description": "Réti Opening"
+        }
+    },
+    chess.BLACK: {
+        "King's Indian Defense": {
+            "pieces": {chess.KNIGHT: [chess.F6], chess.PAWN: [chess.G6, chess.D6], chess.BISHOP: [chess.G7]},
+            "description": "King's Indian Defense"
+        },
+        "Grünfeld Defense": {
+            "pieces": {chess.KNIGHT: [chess.F6], chess.PAWN: [chess.G6, chess.D5], chess.BISHOP: [chess.G7]},
+            "description": "Grünfeld Defense"
+        },
+        "Modern Defense": {
+            "pieces": {chess.PAWN: [chess.G6], chess.BISHOP: [chess.G7]},
+            "description": "Modern Defense Setup"
+        },
+        "Dutch Defense": {
+            "pieces": {chess.PAWN: [chess.F5]},
+            "description": "Dutch Defense"
+        }
+    }
+}
+
 
 # --- NOUA CONFIGURAȚIE PENTRU 720p (1280x720) ---
 @dataclass
@@ -183,6 +223,7 @@ class GameState:
     
     # NOU: Câmp pentru a reține ce linie de capcană a ales utilizatorul
     active_trap_line: Optional[List[str]] = None
+
 
 # Repository Layer
 
@@ -282,6 +323,23 @@ class TrapRepository:
         with sqlite3.connect(self.db_path) as conn:
             conn.executemany("UPDATE traps SET color = ? WHERE id = ?", updates)
             conn.commit()
+
+    def get_trap_counts_by_color(self) -> Tuple[int, int]:
+        """Returns the number of traps for White and Black."""
+        white_count = 0
+        black_count = 0
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                # chess.WHITE este True (1), chess.BLACK este False (0)
+                cursor = conn.execute("SELECT color, COUNT(*) FROM traps GROUP BY color")
+                for color, count in cursor.fetchall():
+                    if color == 1: # White
+                        white_count = count
+                    else: # Black
+                        black_count = count
+        except sqlite3.Error as e:
+            print(f"[DB ERROR] Could not get trap counts: {e}")
+        return white_count, black_count
 
 # Service Layer
 class TrapService:
@@ -681,12 +739,12 @@ class PGNImportService:
         
         return white_traps, black_traps
 
+
 @dataclass
 class OpeningInfo:
-    """Informații despre o deschidere."""
+    """Informații despre o deschidere, citite din baza de date."""
     name: str
     eco_code: str
-    category: str  # "Open", "Semi-Open", "Closed", "Indian", "Flank", etc.
   
 class DatabaseAuditor:
     """
@@ -766,104 +824,123 @@ class DatabaseAuditor:
         return report, changes_made
 
 class OpeningDatabase:
-    """Bază de date eficientă pentru deschideri, cu un dicționar îmbogățit."""
+    """Bază de date hibridă pentru deschideri, cu logging inteligent."""
     
-    def __init__(self):
-        # Folosim un dicționar unde cheia este tuple de mutări
-        self.openings: Dict[Tuple[str, ...], OpeningInfo] = {}
-        self._load_openings()
-        print(f"[DEBUG INIT] Opening database loaded with {len(self.openings)} entries.")
+    def __init__(self, db_path: str = "openings.db"):
+        self.db_path = db_path
+        self.conn = None
+        # --- NOILE VARIABILE PENTRU LOGGING STATIC ---
+        self.last_white_desc = ""
+        self.last_black_desc = ""
+        self.last_theory = ""
+        # -------------------------------------------
         
-    def _load_openings(self):
-        """Încarcă toate deschiderile. Organizat pe categorii pentru claritate."""
-        
-        # --- DESCHIDERI DESCHISE (1.e4 e5) ---
-        self.openings[("e4", "e5")] = OpeningInfo("King's Pawn Game", "C20", "Open")
-        self.openings[("e4", "e5", "Nf3")] = OpeningInfo("King's Knight Opening", "C40", "Open")
-        self.openings[("e4", "e5", "Nf3", "Nc6")] = OpeningInfo("Italian/Spanish Base", "C44", "Open")
-        self.openings[("e4", "e5", "Nf3", "Nc6", "Bb5")] = OpeningInfo("Spanish (Ruy Lopez)", "C60", "Open")
-        self.openings[("e4", "e5", "Nf3", "Nc6", "Bb5", "a6")] = OpeningInfo("Spanish: Morphy Defense", "C70", "Open")
-        self.openings[("e4", "e5", "Nf3", "Nc6", "Bb5", "a6", "Ba4", "Nf6")] = OpeningInfo("Spanish: Closed", "C78", "Open")
-        self.openings[("e4", "e5", "Nf3", "Nc6", "Bc4")] = OpeningInfo("Italian Game", "C50", "Open")
-        self.openings[("e4", "e5", "Nf3", "Nc6", "Bc4", "Bc5")] = OpeningInfo("Italian: Giuoco Piano", "C53", "Open")
-        self.openings[("e4", "e5", "Nf3", "Nc6", "Bc4", "Nf6")] = OpeningInfo("Italian: Two Knights", "C55", "Open")
-        self.openings[("e4", "e5", "Nf3", "Nc6", "Bc4", "Nf6", "Ng5", "d5", "exd5", "Na5")] = OpeningInfo("Two Knights: Polerio", "C58", "Open")
-        self.openings[("e4", "e5", "Nf3", "Nc6", "Bc4", "Nf6", "Ng5", "d5", "exd5", "Nxd5", "Nxf7")] = OpeningInfo("Fried Liver Attack!", "C57", "Open")
-        self.openings[("e4", "e5", "Nf3", "Nc6", "d4")] = OpeningInfo("Scotch Game", "C44", "Open")
-        self.openings[("e4", "e5", "Nf3", "Nc6", "d4", "exd4", "c3")] = OpeningInfo("Scotch Gambit", "C44", "Open")
-        self.openings[("e4", "e5", "Nf3", "Nf6")] = OpeningInfo("Petrov's Defense", "C42", "Open")
-        self.openings[("e4", "e5", "Nc3")] = OpeningInfo("Vienna Game", "C25", "Open")
-        self.openings[("e4", "e5", "f4")] = OpeningInfo("King's Gambit", "C30", "Open")
-        self.openings[("e4", "e5", "f4", "exf4")] = OpeningInfo("King's Gambit Accepted", "C33", "Open")
-        self.openings[("e4", "e5", "f4", "d5")] = OpeningInfo("King's Gambit Declined", "C30", "Open")
+        if os.path.exists(self.db_path):
+            try:
+                db_uri = f"file:{self.db_path}?mode=ro"
+                self.conn = sqlite3.connect(db_uri, uri=True, check_same_thread=False)
+                count = self.conn.cursor().execute("SELECT COUNT(*) FROM openings").fetchone()[0]
+                print(f"[DEBUG INIT] Connection to opening book '{self.db_path}' successful. Found {count} entries.")
+            except sqlite3.Error as e:
+                print(f"[ERROR] Could not connect to opening book database: {e}")
 
-        # --- DESCHIDERI SEMI-DESCHISE (1.e4 altceva) ---
-        self.openings[("e4", "c5")] = OpeningInfo("Sicilian Defense", "B20", "Semi-Open")
-        self.openings[("e4", "c5", "Nf3", "d6", "d4", "cxd4", "Nxd4", "Nf6", "Nc3", "a6")] = OpeningInfo("Sicilian: Najdorf", "B90", "Semi-Open")
-        self.openings[("e4", "c5", "Nf3", "d6", "d4", "cxd4", "Nxd4", "Nf6", "Nc3", "g6")] = OpeningInfo("Sicilian: Dragon", "B70", "Semi-Open")
-        self.openings[("e4", "c5", "Nf3", "Nc6", "d4", "cxd4", "Nxd4", "Nf6", "Nc3", "e5")] = OpeningInfo("Sicilian: Sveshnikov", "B33", "Semi-Open")
-        self.openings[("e4", "c5", "Nf3", "Nc6", "Bb5")] = OpeningInfo("Sicilian: Rossolimo", "B31", "Semi-Open")
-        self.openings[("e4", "c5", "Nc3")] = OpeningInfo("Sicilian: Closed", "B23", "Semi-Open")
-        self.openings[("e4", "c5", "c3")] = OpeningInfo("Sicilian: Alapin", "B22", "Semi-Open")
-        self.openings[("e4", "e6")] = OpeningInfo("French Defense", "C00", "Semi-Open")
-        self.openings[("e4", "e6", "d4", "d5")] = OpeningInfo("French Defense", "C00", "Semi-Open")
-        self.openings[("e4", "e6", "d4", "d5", "e5")] = OpeningInfo("French: Advance", "C02", "Semi-Open")
-        self.openings[("e4", "e6", "d4", "d5", "Nc3", "Bb4")] = OpeningInfo("French: Winawer", "C15", "Semi-Open")
-        self.openings[("e4", "e6", "d4", "d5", "Nd2")] = OpeningInfo("French: Tarrasch", "C03", "Semi-Open")
-        self.openings[("e4", "e6", "d4", "d5", "exd5")] = OpeningInfo("French: Exchange", "C01", "Semi-Open")
-        self.openings[("e4", "c6")] = OpeningInfo("Caro-Kann Defense", "B10", "Semi-Open")
-        self.openings[("e4", "c6", "d4", "d5", "e5")] = OpeningInfo("Caro-Kann: Advance", "B12", "Semi-Open")
-        self.openings[("e4", "c6", "d4", "d5", "Nc3", "dxe4", "Nxe4", "Bf5")] = OpeningInfo("Caro-Kann: Classical", "B18", "Semi-Open")
-        
-        # --- DESCHIDERI ÎNCHISE & INDIENE (1.d4) ---
-        self.openings[("d4", "d5")] = OpeningInfo("Queen's Pawn Game", "D00", "Closed")
-        self.openings[("d4", "d5", "c4")] = OpeningInfo("Queen's Gambit", "D06", "Closed")
-        self.openings[("d4", "d5", "c4", "e6")] = OpeningInfo("Queen's Gambit Declined", "D30", "Closed")
-        self.openings[("d4", "d5", "c4", "e6", "Nc3", "Nf6", "cxd5", "exd5", "Bg5")] = OpeningInfo("QGD: Exchange, Main Line", "D35", "Closed")
-        self.openings[("d4", "d5", "c4", "e6", "Nc3", "c5")] = OpeningInfo("QGD: Tarrasch Defense", "D32", "Closed")
-        self.openings[("d4", "d5", "c4", "dxc4")] = OpeningInfo("Queen's Gambit Accepted", "D20", "Closed")
-        self.openings[("d4", "d5", "c4", "c6")] = OpeningInfo("Slav Defense", "D10", "Closed")
-        self.openings[("d4", "d5", "Nf3", "Nf6", "Bf4")] = OpeningInfo("London System", "D02", "Closed")
-        self.openings[("d4", "f5")] = OpeningInfo("Dutch Defense", "A80", "Indian")
-        
-        self.openings[("d4", "Nf6")] = OpeningInfo("Indian Defense", "A45", "Indian")
-        self.openings[("d4", "Nf6", "c4", "e6", "Nc3", "Bb4")] = OpeningInfo("Nimzo-Indian Defense", "E20", "Indian")
-        self.openings[("d4", "Nf6", "c4", "e6", "Nf3", "b6")] = OpeningInfo("Queen's Indian Defense", "E12", "Indian")
-        self.openings[("d4", "Nf6", "c4", "g6", "Nc3", "d5")] = OpeningInfo("Grünfeld Defense", "D80", "Indian")
-        self.openings[("d4", "Nf6", "c4", "g6", "Nc3", "Bg7", "e4", "d6")] = OpeningInfo("King's Indian Defense", "E90", "Indian")
-        
-        # --- DESCHIDERI FLANK ---
-        self.openings[("c4",)] = OpeningInfo("English Opening", "A10", "Flank")
-        self.openings[("c4", "e5")] = OpeningInfo("English: King's English", "A20", "Flank")
-        self.openings[("c4", "c5")] = OpeningInfo("English: Symmetrical", "A30", "Flank")
-        self.openings[("Nf3",)] = OpeningInfo("Réti Opening", "A04", "Flank")
-        self.openings[("Nf3", "d5", "g3")] = OpeningInfo("Réti: King's Indian Attack", "A07", "Flank")
-
-    def get_opening_name(self, moves: List[str]) -> Optional[OpeningInfo]:
-        """Găsește cea mai specifică deschidere pentru o listă de mutări."""
-        for length in range(len(moves), 0, -1):
-            move_tuple = tuple(moves[:length])
-            if move_tuple in self.openings:
-                return self.openings[move_tuple]
+    def _check_system_fingerprint(self, board: chess.Board, color: chess.Color) -> Optional[str]:
+        systems_for_color = SYSTEM_FINGERPRINTS.get(color, {})
+        for system_name, data in systems_for_color.items():
+            all_pieces_in_place = all(
+                (piece_on_square := board.piece_at(square)) and
+                piece_on_square.piece_type == piece_type and
+                piece_on_square.color == color
+                for piece_type, squares in data["pieces"].items()
+                for square in squares
+            )
+            if all_pieces_in_place:
+                return system_name
         return None
-        
-    def get_opening_phase_info(self, moves: List[str]) -> Tuple[str, str]:
-        """Returnează informații despre faza jocului pentru fiecare parte."""
-        opening_info = self.get_opening_name(moves)
-        
-        if not opening_info:
-            if not moves:
-                return "Starting Position", "Starting Position"
-            else:
-                # Folosește ultima deschidere cunoscută dacă nu mai avem potrivire
-                # Caută din nou, dar nu returna 'None'
-                last_known = self.get_opening_name(moves[:-1])
-                if last_known:
-                    return f"{last_known.name}...", f"{last_known.name}..."
-                return "Book moves end", "Book moves end"
 
-        base_text = f"{opening_info.name} ({opening_info.eco_code})"
-        return base_text, base_text
+    def _get_opening_name_from_db(self, moves: List[str]) -> Optional[OpeningInfo]:
+        if not self.conn or not moves: return None
+        try:
+            cursor = self.conn.cursor()
+            for length in range(len(moves), 0, -1):
+                moves_json = json.dumps(moves[:length])
+                cursor.execute("SELECT name, eco_code FROM openings WHERE moves_json = ?", (moves_json,))
+                if result := cursor.fetchone():
+                    return OpeningInfo(name=result[0], eco_code=result[1])
+            return None
+        except sqlite3.Error as e:
+            print(f"[DB ERROR] Error querying opening book: {e}")
+            return None
+
+    def get_opening_phase_info(self, board: chess.Board, moves: List[str]) -> Tuple[str, str]:
+        if not moves:
+            # La începutul partidei, resetăm totul
+            self.last_white_desc = "Starting Position"
+            self.last_black_desc = "Starting Position"
+            self.last_theory = None
+            return self.last_white_desc, self.last_black_desc
+
+        # Cine a făcut ultima mutare?
+        last_move_color = not board.turn 
+
+        # 1. Detectăm întotdeauna sistemele
+        white_system = self._check_system_fingerprint(board, chess.WHITE)
+        black_system = self._check_system_fingerprint(board, chess.BLACK)
+        
+        # 2. Găsim teoria
+        theoretical_opening = self._get_opening_name_from_db(moves)
+        theory_name = f"{theoretical_opening.name} ({theoretical_opening.eco_code})" if theoretical_opening else None
+        
+        # Pornim de la descrierile anterioare
+        final_white = self.last_white_desc
+        final_black = self.last_black_desc
+
+        # Prioritatea 1: Dacă un sistem a fost detectat, el devine starea de bază pentru acel jucător
+        if white_system:
+            final_white = white_system
+        if black_system:
+            final_black = black_system
+
+        # Prioritatea 2: Teoria. O atribuim jucătorului care a făcut mutarea ce a condus la ea.
+        if theory_name and theory_name != self.last_theory:
+            # A apărut o nouă teorie!
+            is_black_theory = "defense" in theory_name.lower() or "defence" in theory_name.lower() or "counter" in theory_name.lower()
+            is_white_theory = "attack" in theory_name.lower() or "gambit" in theory_name.lower() or "opening" in theory_name.lower()
+
+            if last_move_color == chess.WHITE:
+                # Albul a făcut mutarea care a schimbat teoria
+                if not white_system or (white_system and white_system.lower() in theory_name.lower()):
+                     final_white = theory_name
+            
+            elif last_move_color == chess.BLACK:
+                # Negrul a făcut mutarea
+                if not black_system or (black_system and black_system.lower() in theory_name.lower()):
+                     final_black = theory_name
+
+            # Cazul special pentru deschideri neutre, ca "Italian Game"
+            if not is_white_theory and not is_black_theory:
+                # Dacă teoria e neutră, o setăm pentru ambii dacă nu au sisteme
+                if not white_system: final_white = theory_name
+                if not black_system: final_black = theory_name
+
+        # Fallback final pentru a nu rămâne cu "Starting Position"
+        if final_white == "Starting Position": final_white = "Developing"
+        if final_black == "Starting Position": final_black = "Developing"
+        
+        # Logging și actualizare stare (rămâne la fel)
+        if final_white != self.last_white_desc or final_black != self.last_black_desc or theory_name != self.last_theory:
+            print("\n--- Opening State Update ---")
+            print(f"  Move by: {'White' if last_move_color == chess.WHITE else 'Black'}")
+            print(f"  Detected White System: {white_system or 'N/A'}")
+            print(f"  Detected Black System: {black_system or 'N/A'}")
+            print(f"  Detected Theory Line: {theory_name or 'N/A'}")
+            print(f"  ==> Displaying: [W: {final_white}] | [B: {final_black}]")
+            
+            self.last_white_desc = final_white
+            self.last_black_desc = final_black
+            self.last_theory = theory_name
+
+        return final_white, final_black
 
 class SettingsService:
     """Service for managing application settings."""
@@ -1012,39 +1089,43 @@ class Renderer:
         # Color buttons
         button_width, button_height = 300, 50
         center_x = self.config.WIDTH // 2
+        y_pos = 250
         
-        # White button
-        white_rect = pygame.Rect(center_x - button_width // 2, 250, button_width, button_height)
+        white_rect = pygame.Rect(center_x - button_width // 2, y_pos, button_width, button_height)
         white_color = (100, 100, 100) if selected_color == chess.WHITE else (70, 70, 70)
-        pygame.draw.rect(surface, white_color, white_rect)
-        pygame.draw.rect(surface, self.config.BORDER_COLOR, white_rect, 2)
-        
+        pygame.draw.rect(surface, white_color, white_rect, border_radius=5)
+        pygame.draw.rect(surface, self.config.BORDER_COLOR, white_rect, 2, border_radius=5)
         white_text = self.font.render("Play as White", True, self.config.TEXT_COLOR)
-        white_text_rect = white_text.get_rect(center=white_rect.center)
-        surface.blit(white_text, white_text_rect)
+        surface.blit(white_text, white_text.get_rect(center=white_rect.center))
         button_rects["white"] = white_rect
-        
-        # Black button
-        black_rect = pygame.Rect(center_x - button_width // 2, 310, button_width, button_height)
+        y_pos += 60
+
+        black_rect = pygame.Rect(center_x - button_width // 2, y_pos, button_width, button_height)
         black_color = (100, 100, 100) if selected_color == chess.BLACK else (70, 70, 70)
-        pygame.draw.rect(surface, black_color, black_rect)
-        pygame.draw.rect(surface, self.config.BORDER_COLOR, black_rect, 2)
-        
+        pygame.draw.rect(surface, black_color, black_rect, border_radius=5)
+        pygame.draw.rect(surface, self.config.BORDER_COLOR, black_rect, 2, border_radius=5)
         black_text = self.font.render("Play as Black", True, self.config.TEXT_COLOR)
-        black_text_rect = black_text.get_rect(center=black_rect.center)
-        surface.blit(black_text, black_text_rect)
+        surface.blit(black_text, black_text.get_rect(center=black_rect.center))
         button_rects["black"] = black_rect
-        
+        y_pos += 80
+
         # Start button
-        start_rect = pygame.Rect(center_x - 100, 400, 200, button_height)
-        pygame.draw.rect(surface, (0, 120, 0), start_rect)
-        pygame.draw.rect(surface, self.config.BORDER_COLOR, start_rect, 2)
-        
+        start_rect = pygame.Rect(center_x - 100, y_pos, 200, button_height)
+        pygame.draw.rect(surface, (0, 120, 0), start_rect, border_radius=5)
+        pygame.draw.rect(surface, self.config.BORDER_COLOR, start_rect, 2, border_radius=5)
         start_text = self.font.render("Start Game", True, self.config.TEXT_COLOR)
-        start_text_rect = start_text.get_rect(center=start_rect.center)
-        surface.blit(start_text, start_text_rect)
+        surface.blit(start_text, start_text.get_rect(center=start_rect.center))
         button_rects["start"] = start_rect
-        
+        y_pos += 80
+
+        # --- BUTON NOU: DATABASE INFO ---
+        info_rect = pygame.Rect(center_x - 125, y_pos, 250, 40)
+        pygame.draw.rect(surface, (0, 80, 120), info_rect, border_radius=5) # Albastru închis
+        pygame.draw.rect(surface, self.config.BORDER_COLOR, info_rect, 2, border_radius=5)
+        info_text = self.small_font.render("Database Info", True, self.config.TEXT_COLOR)
+        surface.blit(info_text, info_text.get_rect(center=info_rect.center))
+        button_rects["info"] = info_rect
+
         return button_rects
     
     def render_game_screen(self, surface: pygame.Surface, state: GameState, 
@@ -1087,89 +1168,105 @@ class Renderer:
         
         return all_button_rects
     
-    def render_control_panel(self, surface: pygame.Surface, state: GameState) -> Dict[str, pygame.Rect]:
-        """Render the control panel with buttons."""
+    def render_control_panel(self, surface: pygame.Surface, state: GameState, move_history: List[str]) -> Dict[str, pygame.Rect]:
+        """Render the control panel with buttons AND the move history panel."""
         button_rects = {}
         
-        # Panel background
+        # Fundalul panoului principal
         panel_rect = pygame.Rect(0, 0, self.config.BUTTONS_WIDTH, self.config.HEIGHT)
         pygame.draw.rect(surface, self.config.PANEL_COLOR, panel_rect)
         pygame.draw.rect(surface, self.config.BORDER_COLOR, panel_rect, 2)
         
-        # Title
+        y_offset = 10
         title_surface = self.font.render("Controls:", True, self.config.TEXT_COLOR)
-        surface.blit(title_surface, (10, 10))
-        
-        y_offset = 50
-        button_height = 30
-        button_width = 75
-        spacing = 10
-        
-        # --- AICI ESTE MODIFICAREA ---
-        # Am rearanjat lista pentru a se potrivi ordinii dorite:
-        # 2 (<), 3 (>), 1 (|<), 4 (>|)
-        buttons = [
-            ("one_back", "<", 0, 0),        # Sus-stânga
-            ("one_forward", ">", 1, 0),     # Sus-dreapta
-            ("to_start", "|<", 0, 1),       # Jos-stânga
-            ("to_end", ">|", 1, 1)          # Jos-dreapta
+        surface.blit(title_surface, (10, y_offset))
+        y_offset += 40
+
+        # --- AICI ESTE CORECȚIA FINALĂ (DE DATA ASTA PE BUNE) ---
+        # Ordonare conform specificației: < > sus, |< >| jos
+        nav_buttons = [
+            ("<", "one_back"), 
+            (">", "one_forward"),
+            ("|<", "to_start"), 
+            (">|", "to_end") 
         ]
-        
-        for action, text, col, row in buttons:
+        button_width, button_height, spacing = 80, 35, 10
+        for i, (text, action) in enumerate(nav_buttons):
+            col = i % 2
+            row = i // 2
             x = 20 + col * (button_width + spacing)
             y = y_offset + row * (button_height + spacing)
-            
             rect = pygame.Rect(x, y, button_width, button_height)
-            pygame.draw.rect(surface, self.config.BUTTON_COLOR, rect)
-            pygame.draw.rect(surface, self.config.BORDER_COLOR, rect, 1)
-            
-            text_surface = self.small_font.render(text, True, self.config.TEXT_COLOR)
-            text_rect = text_surface.get_rect(center=rect.center)
-            surface.blit(text_surface, text_rect)
-            
+            pygame.draw.rect(surface, self.config.BUTTON_COLOR, rect, border_radius=3)
+            pygame.draw.rect(surface, self.config.BORDER_COLOR, rect, 1, border_radius=3)
+            text_surf = self.small_font.render(text, True, self.config.TEXT_COLOR)
+            surface.blit(text_surf, text_surf.get_rect(center=rect.center))
             button_rects[action] = rect
+        y_offset += 2 * (button_height + spacing)
         
-        # --- Restul metodei rămâne la fel ---
-        y_offset += 85
-        
-        record_rect = pygame.Rect(20, y_offset, 160, 35)
-        record_color = (120, 0, 0) if state.is_recording else (0, 120, 0)
-        pygame.draw.rect(surface, record_color, record_rect)
-        pygame.draw.rect(surface, self.config.BORDER_COLOR, record_rect, 1)
-        
-        record_text = "Stop Recording" if state.is_recording else "Record Trap"
-        text_surface = self.small_font.render(record_text, True, self.config.TEXT_COLOR)
-        text_rect = text_surface.get_rect(center=record_rect.center)
-        surface.blit(text_surface, text_rect)
-        button_rects["record"] = record_rect
-        
-        y_offset += 45
-        
-        import_buttons = [
-            ("import_pgn", "Import PGN"),
-            ("import_folder", "Import Folder"),
-            ("main_menu", "Main Menu")
+        # Butoane de acțiune
+        action_buttons = [
+            ("Record Trap", "record", (0, 120, 0)),
+            ("Import / Audit", "import_pgn", (0, 100, 150)),
+            ("Main Menu", "main_menu", (150, 150, 0))
         ]
-        
-        for action, text in import_buttons:
-            rect = pygame.Rect(20, y_offset, 160, 30)
-            
-            if action == "import_pgn": color = (0, 100, 0)
-            elif action == "import_folder": color = (100, 0, 100)
-            else: color = (100, 100, 0)
-            
-            pygame.draw.rect(surface, color, rect)
-            pygame.draw.rect(surface, self.config.BORDER_COLOR, rect, 1)
-            
-            text_surface = self.small_font.render(text, True, self.config.TEXT_COLOR)
-            text_rect = text_surface.get_rect(center=rect.center)
-            surface.blit(text_surface, text_rect)
-            
+        for text, action, color in action_buttons:
+            rect = pygame.Rect(20, y_offset, self.config.BUTTONS_WIDTH - 40, 35)
+            if action == "record" and state.is_recording:
+                color = (180, 0, 0)
+                text = "Stop Recording"
+            pygame.draw.rect(surface, color, rect, border_radius=3)
+            text_surf = self.small_font.render(text, True, self.config.TEXT_COLOR)
+            surface.blit(text_surf, text_surf.get_rect(center=rect.center))
             button_rects[action] = rect
-            y_offset += 35
+            y_offset += 45
+
+        # Panoul de Istoric
+        history_y_start = y_offset + 20
+        history_panel_rect = pygame.Rect(10, history_y_start, self.config.BUTTONS_WIDTH - 20, self.config.HEIGHT - history_y_start - 20)
+        pygame.draw.rect(surface, (40, 40, 40), history_panel_rect, border_radius=5)
+        pygame.draw.rect(surface, self.config.BORDER_COLOR, history_panel_rect, 1, border_radius=5)
+
+        history_title_surf = self.small_font.render("Move History:", True, (200, 200, 200))
+        surface.blit(history_title_surf, (history_panel_rect.x + 10, history_panel_rect.y + 10))
+
+        history_text = ""
+        for i, move in enumerate(move_history):
+            if i % 2 == 0:
+                history_text += f"{i//2 + 1}. {move} "
+            else:
+                history_text += f"{move} "
+        
+        def draw_text_wrapped(surf, text, font, color, rect):
+            words = text.split(' ')
+            lines = []
+            current_line = ""
+            for word in words:
+                if font.size(current_line + word)[0] < rect.width - 20:
+                    current_line += word + " "
+                else:
+                    lines.append(current_line)
+                    current_line = word + " "
+            lines.append(current_line)
+            
+            y_text_offset = rect.y + 35
+            for line in lines:
+                if y_text_offset + font.get_height() > rect.y + rect.height - 45:
+                    break
+                line_surf = font.render(line, True, color)
+                surf.blit(line_surf, (rect.x + 10, y_text_offset))
+                y_text_offset += font.get_height()
+                
+        draw_text_wrapped(surface, history_text.strip(), self.small_font, self.config.TEXT_COLOR, history_panel_rect)
+        
+        copy_button_rect = pygame.Rect(history_panel_rect.centerx - 50, history_panel_rect.bottom - 35, 100, 25)
+        pygame.draw.rect(surface, (80, 80, 150), copy_button_rect, border_radius=5)
+        copy_text_surf = self.small_font.render("Copy PGN", True, self.config.TEXT_COLOR)
+        surface.blit(copy_text_surf, copy_text_surf.get_rect(center=copy_button_rect.center))
+        button_rects["copy_pgn"] = copy_button_rect
         
         return button_rects
-    
+        
     def render_board(self, surface: pygame.Surface, state: GameState, flipped: bool = False) -> None:
         """Render the chess board and highlights."""
         # Desenarea pătrățelelor
@@ -1353,76 +1450,7 @@ class Renderer:
             record_rect = record_surface.get_rect(centerx=self.config.LEFT_MARGIN + self.config.BOARD_SIZE // 2, y=5)
             surface.blit(record_surface, record_rect)
 
-    def render_history_panel(self, surface: pygame.Surface, move_history: List[str]) -> pygame.Rect:
-        """Renders the move history panel below the board with a copy button."""
-        # Calculează poziția panoului mai jos, pentru a face loc numelui deschiderii
-        panel_y = self.config.TOP_MARGIN + self.config.BOARD_SIZE + 80 # MODIFICAT de la +15
-        panel_height = self.config.HEIGHT - panel_y - 20 # MODIFICAT pentru a fi dinamic
-        
-        # Asigură-te că panoul are o înălțime minimă și nu depășește ecranul
-        if panel_height < 80: panel_height = 80
-        if panel_y + panel_height > self.config.HEIGHT - 10:
-            panel_height = self.config.HEIGHT - 10 - panel_y
-            
-        panel_rect = pygame.Rect(self.config.LEFT_MARGIN, panel_y, self.config.BOARD_SIZE, panel_height)
-        
-        # Fundalul panoului
-        pygame.draw.rect(surface, (40, 40, 40), panel_rect, border_radius=5)
-        pygame.draw.rect(surface, self.config.BORDER_COLOR, panel_rect, 1, border_radius=5)
-        
-        # Construiește textul istoriei
-        history_text = ""
-        for i, move in enumerate(move_history):
-            if i % 2 == 0:
-                history_text += f"{i//2 + 1}. {move} "
-            else:
-                history_text += f"{move} "
-                
-        # Funcție ajutătoare pentru a desena text pe mai multe rânduri
-        def draw_text_wrapped(surf, text, font, color, rect):
-            words = text.split(' ')
-            lines = []
-            current_line = ""
-            space_width = font.size(' ')[0]
-            
-            for word in words:
-                # Verificăm lățimea liniei curente + noul cuvânt
-                if font.size(current_line + word)[0] < rect.width - 20: # 20 = padding (10 stânga, 10 dreapta)
-                    current_line += word + " "
-                else:
-                    lines.append(current_line)
-                    current_line = word + " "
-            lines.append(current_line)
-            
-            y_offset = rect.y + 10
-            for line in lines:
-                # Verificăm dacă mai este loc pe verticală
-                if y_offset + font.get_height() > rect.y + rect.height - 40: # 40 = spațiu pentru buton
-                    # Adăugăm "..." la ultima linie vizibilă
-                    if lines.index(line) > 0:
-                        last_visible_line = lines[lines.index(line)-1].strip() + "..."
-                        # Ștergem ultima linie desenată pentru a o redesena cu "..."
-                        y_offset -= font.get_height()
-                        pygame.draw.rect(surf, (40,40,40), pygame.Rect(rect.x+1, y_offset, rect.width-2, font.get_height())) # Acoperă textul vechi
-                        line_surf = font.render(last_visible_line, True, color)
-                        surf.blit(line_surf, (rect.x + 10, y_offset))
-                    break # Oprim desenarea
-                    
-                line_surf = font.render(line, True, color)
-                surf.blit(line_surf, (rect.x + 10, y_offset))
-                y_offset += font.get_height()
-
-        draw_text_wrapped(surface, history_text.strip(), self.small_font, self.config.TEXT_COLOR, panel_rect)
-        
-        # Butonul de copiere
-        copy_button_rect = pygame.Rect(panel_rect.right - 100, panel_rect.bottom - 35, 90, 25)
-        pygame.draw.rect(surface, (80, 80, 150), copy_button_rect, border_radius=5)
-        copy_text_surf = self.small_font.render("Copy", True, self.config.TEXT_COLOR)
-        copy_text_rect = copy_text_surf.get_rect(center=copy_button_rect.center)
-        surface.blit(copy_text_surf, copy_text_rect)
-        
-        return copy_button_rect
-
+    
 if QT_AVAILABLE:
     class QtImportWindow(QDialog):
         """A non-blocking Qt Dialog for PGN import settings."""
@@ -1582,6 +1610,36 @@ if QT_AVAILABLE:
             
             self.accept() # accept() închide dialogul cu succes
 
+    class QtInfoDialog(QDialog):
+        """A simple dialog to display database statistics."""
+        def __init__(self, stats: Dict[str, str], parent=None):
+            super().__init__(parent)
+            self.setWindowTitle("Database Statistics")
+            self.setMinimumWidth(300)
+
+            layout = QVBoxLayout(self)
+            
+            group_box = QGroupBox("Current Content")
+            group_layout = QVBoxLayout()
+            
+            for key, value in stats.items():
+                h_layout = QHBoxLayout()
+                key_label = QLabel(f"<b>{key}:</b>") # Text aldin
+                value_label = QLabel(value)
+                value_label.setAlignment(Qt.AlignmentFlag.AlignRight)
+                
+                h_layout.addWidget(key_label)
+                h_layout.addWidget(value_label)
+                group_layout.addLayout(h_layout)
+
+            group_box.setLayout(group_layout)
+            layout.addWidget(group_box)
+            
+            # Buton de OK
+            ok_button = QPushButton("OK")
+            ok_button.clicked.connect(self.accept)
+            layout.addWidget(ok_button, 0, Qt.AlignmentFlag.AlignCenter)
+
 # Main Game Controller
 class GameController:
     """Main controller that orchestrates the game."""
@@ -1598,8 +1656,6 @@ class GameController:
         
         pygame.init()
         
-        # --- MODIFICARE CHEIE ---
-        # Creăm config-ul, APOI creăm componentele care depind de el
         self.config = UIConfig()
         
         print(f"[DEBUG INIT] UI Config: WIDTH={self.config.WIDTH}, HEIGHT={self.config.HEIGHT}")
@@ -1607,15 +1663,13 @@ class GameController:
         self.trap_service = TrapService(self.trap_repository)
         self.pgn_service = PGNImportService(self.trap_repository)
         self.settings_service = SettingsService()
-        self.opening_db = OpeningDatabase()  # <--- LINIA ADĂUGATĂ AICI
+        self.opening_db = OpeningDatabase()
         
         self.screen = pygame.display.set_mode((self.config.WIDTH, self.config.HEIGHT))
         pygame.display.set_caption("Chess Trap Trainer - Clean Architecture")
         
-        # Creăm loader-ul de piese cu noua dimensiune
         self.piece_loader = PieceImageLoader(self.config.SQUARE_SIZE)
         self.input_handler = InputHandler(self.config)
-        # Creăm renderer-ul după ce avem toate componentele
         self.renderer = Renderer(self.config, self.piece_loader)
         
         initial_board = chess.Board()
@@ -1627,7 +1681,9 @@ class GameController:
         self.move_history_forward = []
         self.current_suggestions = []
         self.highlighted_moves = []
-        self.copy_button_rect = None
+        
+        # --- AICI ESTE MODIFICAREA ---
+        self.copy_pgn_button_rect = None 
         
         print("[DEBUG INIT] GameController initialization complete!")
     
@@ -1639,7 +1695,8 @@ class GameController:
         clock = pygame.time.Clock()
         running = True
         
-        self._update_suggestions()
+        # Asigură-te că sugestiile inițiale sunt încărcate corect
+        self.current_suggestions = self.trap_service.get_aggregated_suggestions(self.current_state)
 
         while running:
             if self.qt_app:
@@ -1655,12 +1712,9 @@ class GameController:
                 if event.type == pygame.QUIT:
                     running = False
                 
-                is_qt_window_active = False # Verificare dacă o fereastră Qt e activă
-                if self.qt_app:
-                    if self.qt_app.activeWindow() is not None:
-                        is_qt_window_active = True
-                
-                if is_qt_window_active: continue
+                is_qt_window_active = self.qt_app and self.qt_app.activeWindow() is not None
+                if is_qt_window_active:
+                    continue
 
                 if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
                     if self.show_start_screen:
@@ -1686,7 +1740,10 @@ class GameController:
             if self.show_start_screen:
                 self.renderer.render_start_screen(self.screen, self.selected_color)
             else:
-                self.renderer.render_control_panel(self.screen, self.current_state)
+                # --- BLOCUL DE RANDARE MODIFICAT ---
+                all_buttons = self.renderer.render_control_panel(self.screen, self.current_state, self.current_state.move_history)
+                self.copy_pgn_button_rect = all_buttons.get("copy_pgn")
+
                 self.renderer.render_board(self.screen, self.current_state, self.flipped)
                 self.renderer.render_pieces(
                     self.screen, self.current_state.board, self.piece_loader,
@@ -1694,23 +1751,24 @@ class GameController:
                     self.current_state.dragging_piece, self.current_state.drag_pos
                 )
                 total_matching = self.trap_service.count_matching_traps(self.current_state)
-                self.renderer.render_suggestions_panel(
+                
+                # Re-colectăm sugestiile aici pentru a fi mereu actualizate
+                # Aceasta este o îmbunătățire de robustețe
+                self.current_suggestions = self.trap_service.get_aggregated_suggestions(self.current_state)
+                
+                suggestion_buttons = self.renderer.render_suggestions_panel(
                     self.screen, self.current_suggestions, total_matching
                 )
                 
-                # --- BLOCUL MODIFICAT ESTE AICI ---
-                # Obținem informațiile despre deschidere de la noul nostru serviciu
-                white_info, black_info = self.opening_db.get_opening_phase_info(self.current_state.move_history)
-                # Pasăm aceste informații către metoda de randare a statusului
-                self.renderer.render_status(self.screen, self.current_state, white_info, black_info)
-                # --- SFÂRȘITUL BLOCULUI MODIFICAT ---
-                
-                # Randăm panoul de istoric
-                self.copy_button_rect = self.renderer.render_history_panel(
-                    self.screen, 
+                # --- AICI ESTE MODIFICAREA CHEIE ---
+                # Pasăm acum atât tabla, cât și istoricul de mutări către funcția de info
+                white_info, black_info = self.opening_db.get_opening_phase_info(
+                    self.current_state.board, 
                     self.current_state.move_history
                 )
-
+                self.renderer.render_status(self.screen, self.current_state, white_info, black_info)
+                # --- SFÂRȘITUL MODIFICĂRII ---
+                
                 if self.current_state.is_recording:
                      self.screen.blit(self.text_input_visual.surface, (self.config.LEFT_MARGIN, self.config.HEIGHT - 50))
 
@@ -1720,12 +1778,10 @@ class GameController:
         print("[DEBUG MAIN] Main loop ended")
         pygame.quit()
     
-    def _handle_start_screen_click(self, pos: Tuple[int, int]) -> bool:
+    def _handle_start_screen_click(self, pos: Tuple[int, int]) -> None: # Am schimbat return type la None
         """Handle clicks on the start screen."""
-        # Render to get button positions
         button_rects = self.renderer.render_start_screen(self.screen, self.selected_color)
         
-        # Check button clicks
         action = self.input_handler.handle_button_click(pos, button_rects)
         
         if action == "white":
@@ -1734,9 +1790,8 @@ class GameController:
             self.selected_color = chess.BLACK
         elif action == "start":
             self._start_game(self.selected_color)
-        
-        return True  # Continue running
-    
+        elif action == "info": # --- CAZ NOU ---
+            self._show_database_info()
 
     def _start_game(self, color: chess.Color) -> None:
         """Start a new game with the specified color."""
@@ -1812,35 +1867,48 @@ class GameController:
     def _handle_game_mousedown(self, pos: Tuple[int, int]) -> None:
         """Handle mouse down events during main game."""
         
-        # Verificăm întâi click-ul pe butonul de copiere
-        if self.copy_button_rect and self.copy_button_rect.collidepoint(pos):
-            history_text = ""
-            for i, move in enumerate(self.current_state.move_history):
-                if i % 2 == 0:
-                    history_text += f"{i//2 + 1}. {move} "
-                else:
-                    history_text += f"{move} "
-            
-            pyperclip.copy(history_text.strip())
-            print(f"[CLIPBOARD] Copiat: {history_text.strip()}")
-            # Poți adăuga un scurt mesaj vizual aici, dacă dorești
-            return # Ieșim devreme
-
-        # Continuăm cu logica pentru celelalte butoane și tablă
+        # Colectăm TOATE butoanele active de pe ecran într-un singur loc
         all_button_rects = {}
-        control_rects = self.renderer.render_control_panel(pygame.Surface((self.config.BUTTONS_WIDTH, self.config.HEIGHT)), self.current_state)
+        
+        # 1. Butoanele din panoul de control (inclusiv noul "Copy PGN")
+        # --- AICI ESTE CORECȚIA ---
+        control_rects = self.renderer.render_control_panel(
+            pygame.Surface((self.config.BUTTONS_WIDTH, self.config.HEIGHT)), 
+            self.current_state, 
+            self.current_state.move_history  # Am adăugat argumentul lipsă
+        )
         all_button_rects.update(control_rects)
         
+        # 2. Butoanele din panoul de sugestii
         total_matching = self.trap_service.count_matching_traps(self.current_state)
-        suggestion_rects = self.renderer.render_suggestions_panel(pygame.Surface((self.config.SUGGESTIONS_WIDTH, self.config.HEIGHT)), self.current_suggestions, total_matching)
+        suggestion_rects = self.renderer.render_suggestions_panel(
+            pygame.Surface((self.config.SUGGESTIONS_WIDTH, self.config.HEIGHT)), 
+            self.current_suggestions, 
+            total_matching
+        )
         all_button_rects.update(suggestion_rects)
-        
+
+        # Verificăm dacă s-a dat click pe vreun buton
         action = self.input_handler.handle_button_click(pos, all_button_rects)
         
         if action:
-            print(f"[DEBUG] Button action: {action}")
-            self._handle_action(action)
+            # Tratăm acțiunile de la butoane, inclusiv "copy_pgn"
+            if action == "copy_pgn":
+                history_text = ""
+                for i, move in enumerate(self.current_state.move_history):
+                    if i % 2 == 0:
+                        history_text += f"{i//2 + 1}. {move} "
+                    else:
+                        history_text += f"{move} "
+                
+                pyperclip.copy(history_text.strip())
+                print(f"[CLIPBOARD] Copiat: {history_text.strip()}")
+            else:
+                # Tratăm celelalte acțiuni
+                print(f"[DEBUG] Button action: {action}")
+                self._handle_action(action)
         else:
+            # Dacă nu s-a dat click pe niciun buton, verificăm tabla de șah
             self._handle_board_mousedown(pos)
     
     def _handle_game_mouseup(self, pos: Tuple[int, int]) -> None:
@@ -2257,6 +2325,28 @@ class GameController:
         else:
             print("[CONTROLLER] Audit found no issues. No refresh needed.")
             QMessageBox.information(self.qt_app.activeWindow(), "Success", "Database is clean. No changes were made.")
+
+    def _show_database_info(self):
+        """Collects and displays database statistics in a Qt dialog."""
+        if not QT_AVAILABLE:
+            print("[INFO] Cannot show stats: PySide6 (Qt) is not available.")
+            return
+
+        # Colectează datele
+        white_traps, black_traps = self.trap_repository.get_trap_counts_by_color()
+        total_openings = self.opening_db.get_total_openings()
+        
+        # Formatează numerele pentru lizibilitate
+        stats = {
+            "White Traps": f"{white_traps:_}".replace("_", " "),
+            "Black Traps": f"{black_traps:_}".replace("_", " "),
+            "Total Traps": f"{white_traps + black_traps:_}".replace("_", " "),
+            "Indexed Openings": f"{total_openings:_}".replace("_", " ")
+        }
+        
+        # Creează și afișează dialogul
+        dialog = QtInfoDialog(stats)
+        dialog.exec()
 
 def main():
     """Main entry point."""
