@@ -1,4 +1,3 @@
-import threading
 import re
 import io
 import pygame
@@ -10,6 +9,7 @@ import os
 import pyperclip
 import pygame_textinput
 import time
+import pickle
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import List, Dict, Optional, Tuple, Protocol
@@ -116,28 +116,28 @@ def audit_specific_line(line_to_check: List[str], db_path="chess_traps.db"):
     print("\n--- AUDIT COMPLETE FOR SPECIFIC LINE ---")
 
 
-# Configuration and Data Classes
+# --- NOUA CONFIGURAȚIE PENTRU 720p (1280x720) ---
 @dataclass
-class UIConfig:
-    """UI configuration constants for 1080p resolution with history panel."""
+class UIConfig: # Numește-o direct UIConfig pentru a fi folosită
+    """UI configuration constants for 720p resolution with history panel."""
     # --- Rezoluția totală ---
-    WIDTH: int = 1920
-    HEIGHT: int = 1080
+    WIDTH: int = 1280
+    HEIGHT: int = 720
     
-    # --- Dimensiuni Panouri ---
-    BUTTONS_WIDTH: int = 280
-    SUGGESTIONS_WIDTH: int = 500
+    # --- Dimensiuni Panouri (scalate cu ~1.5 și rotunjite) ---
+    BUTTONS_WIDTH: int = 200
+    SUGGESTIONS_WIDTH: int = 340
     
     # --- Dimensiuni Tablă și Panou Istoric ---
-    # Lăsăm un spațiu total de 950px pe verticală pentru tablă + istoric
-    BOARD_AREA_HEIGHT: int = 950
-    # Tabla va ocupa o parte din acest spațiu
-    BOARD_SIZE: int = 768
-    SQUARE_SIZE: int = BOARD_SIZE // 8  # 96px per pătrățel
+    # Tabla trebuie să fie cel mai mare pătrat posibil, multiplu de 8.
+    # Înălțimea disponibilă este ~720px. Lățimea: 1280 - 200 - 340 = 740px.
+    # O valoare bună, mai mică de 720, este 576.
+    BOARD_SIZE: int = 576 # 576 este 72 * 8. Este o valoare excelentă.
+    SQUARE_SIZE: int = BOARD_SIZE // 8  # 72px per pătrățel
     
     # --- Margini ---
-    TOP_MARGIN: int = 50 # O margine superioară fixă
-    LEFT_MARGIN: int = BUTTONS_WIDTH + 60
+    TOP_MARGIN: int = 40
+    LEFT_MARGIN: int = BUTTONS_WIDTH + 40 # Spațiu redus proporțional -> 240
     
     # --- Culori (rămân la fel) ---
     LIGHT_SQUARE: Tuple[int, int, int] = (240, 217, 181)
@@ -184,24 +184,8 @@ class GameState:
     # NOU: Câmp pentru a reține ce linie de capcană a ales utilizatorul
     active_trap_line: Optional[List[str]] = None
 
-
-@dataclass
-class AuditResults:
-    """Holds the results of a full database audit."""
-    total_traps_checked: int = 0
-    
-    # Probleme detectate
-    traps_too_long: List[Tuple[int, str]] = field(default_factory=list)
-    traps_no_checkmate_found: List[Tuple[int, str]] = field(default_factory=list)
-    traps_wrong_color_found: List[Tuple[int, str]] = field(default_factory=list)
-
-    # Acțiuni efectuate
-    checkmates_repaired_count: int = 0
-    colors_corrected_count: int = 0
-    traps_deleted_count: int = 0
-    duplicates_removed_count: int = 0 # <--- CÂMPUL NOU
-
 # Repository Layer
+
 class TrapRepository:
     """Repository for managing chess traps in SQLite database."""
     
@@ -230,340 +214,265 @@ class TrapRepository:
                 "INSERT INTO traps (name, moves, color) VALUES (?, ?, ?)",
                 (trap.name, json.dumps(trap.moves), int(trap.color))
             )
+            conn.commit()
             return cursor.lastrowid
     
     def get_all_traps(self) -> List[ChessTrap]:
         """Get all traps from database."""
         traps = []
-        
-        with sqlite3.connect(self.db_path) as conn:
-            cursor = conn.execute("SELECT id, name, moves, color FROM traps")
-            
-            for row in cursor.fetchall():
-                trap_id, name, moves_json, color = row
-                moves = json.loads(moves_json)
-                traps.append(ChessTrap(
-                    id=trap_id,
-                    name=name,
-                    moves=moves,
-                    color=bool(color)
-                ))
-        
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.execute("SELECT id, name, moves, color FROM traps")
+                for row in cursor.fetchall():
+                    trap_id, name, moves_json, color = row
+                    moves = json.loads(moves_json)
+                    traps.append(ChessTrap(id=trap_id, name=name, moves=moves, color=bool(color)))
+        except sqlite3.Error as e:
+            print(f"[DB ERROR] Could not read traps: {e}")
         return traps
     
     def get_total_trap_count(self) -> int:
         """Get total number of traps in database."""
-        with sqlite3.connect(self.db_path) as conn:
-            cursor = conn.execute("SELECT COUNT(*) FROM traps")
-            return cursor.fetchone()[0]
-    
-    def import_traps(self, traps: List[ChessTrap]) -> int:
-        """Highly optimized batch import with minimal database queries."""
-        if not traps:
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.execute("SELECT COUNT(*) FROM traps")
+                return cursor.fetchone()[0]
+        except sqlite3.Error:
             return 0
             
+    def import_traps(self, traps: List[ChessTrap]) -> int:
+        """Import multiple traps, avoiding duplicates."""
         imported_count = 0
-        start_time = time.time()
         
         with sqlite3.connect(self.db_path) as conn:
-            # Optimizări critice pentru viteză
-            conn.execute("PRAGMA journal_mode = MEMORY")
-            conn.execute("PRAGMA synchronous = OFF")
-            conn.execute("PRAGMA cache_size = -64000")  # 64MB cache
-            conn.execute("PRAGMA temp_store = MEMORY")
-            
-            # 1. Citim TOATE trap-urile existente O SINGURĂ DATĂ
-            print(f"[DEBUG DB] Checking for duplicates among {len(traps)} traps...")
-            cursor = conn.execute("SELECT moves, color FROM traps")
-            existing_signatures = set()
-            for row in cursor:
-                existing_signatures.add((row[0], row[1]))
-            print(f"[DEBUG DB] Found {len(existing_signatures)} existing traps in database")
-            
-            # 2. Pregătim datele pentru batch insert, filtrând duplicatele
-            batch_data = []
-            skipped = 0
-            
             for trap in traps:
-                moves_json = json.dumps(trap.moves)
-                signature = (moves_json, int(trap.color))
-                
-                if signature not in existing_signatures:
-                    batch_data.append((trap.name, moves_json, int(trap.color)))
-                    existing_signatures.add(signature)  # Adaugă în set pentru a evita duplicate în același batch
-                    imported_count += 1
-                else:
-                    skipped += 1
-            
-            # 3. Facem UN SINGUR batch insert pentru TOATE trap-urile noi
-            if batch_data:
-                print(f"[DEBUG DB] Inserting {len(batch_data)} new traps in a single batch...")
-                conn.executemany(
-                    "INSERT INTO traps (name, moves, color) VALUES (?, ?, ?)",
-                    batch_data
+                # Check for duplicates (same color and moves)
+                cursor = conn.execute(
+                    "SELECT id FROM traps WHERE color = ? AND moves = ?",
+                    (int(trap.color), json.dumps(trap.moves))
                 )
-                conn.commit()
-            
-            # Reactivăm setările normale
-            conn.execute("PRAGMA journal_mode = WAL")
-            conn.execute("PRAGMA synchronous = NORMAL")
-        
-        elapsed = time.time() - start_time
-        print(f"[DEBUG DB] Import complete in {elapsed:.2f} seconds: {imported_count} added, {skipped} duplicates skipped")
+                
+                if not cursor.fetchone():  # No duplicate found
+                    trap_id = self.save_trap(trap)
+                    imported_count += 1
+                    print(f"[DEBUG DB] Salvat: {trap.name} (ID: {trap_id})")
+                else:
+                    print(f"[DEBUG DB] Duplicat găsit, sărim: {trap.name}")
         
         return imported_count
 
-    def batch_update_trap_colors(self, corrections: List[Tuple[int, int]]) -> int:
-        """
-        Updates the color for a batch of traps.
-        :param corrections: A list of tuples, where each tuple is (new_color_int, trap_id).
-        :return: The number of rows updated.
-        """
-        if not corrections:
-            return 0
-
-        updated_count = 0
+    # --- METODE NOI PENTRU AUDIT ---
+    
+    def delete_traps_by_ids(self, ids: List[int]):
+        """Deletes multiple traps from the database in a single transaction."""
+        if not ids:
+            return
         with sqlite3.connect(self.db_path) as conn:
-            cursor = conn.cursor()
-            try:
-                cursor.executemany(
-                    "UPDATE traps SET color = ? WHERE id = ?",
-                    corrections
-                )
-                conn.commit()
-                updated_count = cursor.rowcount
-                print(f"[DB AUDIT] Successfully corrected the color for {updated_count} traps.")
-            except sqlite3.Error as e:
-                print(f"[DB AUDIT ERROR] Failed to batch update trap colors: {e}")
-                conn.rollback()
-
-        return updated_count
-
-    def batch_update_trap_moves(self, repairs: List[Tuple[str, int]]) -> int:
-        """
-        Updates the moves JSON string for a batch of traps.
-        :param repairs: A list of tuples, where each tuple is (new_moves_json, trap_id).
-        :return: The number of rows updated.
-        """
-        if not repairs:
-            return 0
-        updated_count = 0
+            # Create a placeholder string like (?, ?, ?) for the number of IDs
+            placeholders = ', '.join('?' for _ in ids)
+            query = f"DELETE FROM traps WHERE id IN ({placeholders})"
+            conn.execute(query, ids)
+            conn.commit()
+            
+    def update_trap_colors(self, updates: List[Tuple[bool, int]]):
+        """Batch updates the color of multiple traps."""
+        if not updates:
+            return
+        # `updates` is a list of (new_color, trap_id)
         with sqlite3.connect(self.db_path) as conn:
-            cursor = conn.cursor()
-            try:
-                cursor.executemany("UPDATE traps SET moves = ? WHERE id = ?", repairs)
-                conn.commit()
-                updated_count = cursor.rowcount
-            except sqlite3.Error as e:
-                print(f"[DB REPAIR ERROR] Failed to batch update trap moves: {e}")
-                conn.rollback()
-        return updated_count
-
-    def batch_delete_traps(self, trap_ids: List[int]) -> int:
-        """
-        Deletes a batch of traps by their IDs.
-        :param trap_ids: A list of trap IDs to delete.
-        :return: The number of rows deleted.
-        """
-        if not trap_ids:
-            return 0
-        # SQLite's executemany needs a list of tuples
-        ids_to_delete = [(trap_id,) for trap_id in trap_ids]
-        deleted_count = 0
-        with sqlite3.connect(self.db_path) as conn:
-            cursor = conn.cursor()
-            try:
-                cursor.executemany("DELETE FROM traps WHERE id = ?", ids_to_delete)
-                conn.commit()
-                deleted_count = cursor.rowcount
-            except sqlite3.Error as e:
-                print(f"[DB REPAIR ERROR] Failed to batch delete traps: {e}")
-                conn.rollback()
-        return deleted_count
+            conn.executemany("UPDATE traps SET color = ? WHERE id = ?", updates)
+            conn.commit()
 
 # Service Layer
 class TrapService:
-    """Service for managing trap logic and suggestions."""
+    """
+    Service for managing trap logic and suggestions using position-based indexing
+    with on-disk caching for fast startup.
+    """
+    
+    # Definim calea către fișierul de cache
+    CACHE_FILE_PATH = "trap_index.cache"
     
     def __init__(self, repository: TrapRepository):
         self.repository = repository
-        # Încărcăm toate capcanele o singură dată la inițializare pentru performanță
+        print("[TRAP SERVICE] Initializing...")
+        start_time = time.time()
+        
+        # 1. Încărcăm toate capcanele
         self.all_traps = self.repository.get_all_traps()
-    
-    def _get_matching_traps(self, game_state: GameState) -> List[ChessTrap]:
-        if game_state.is_recording: return []
-        target_color = game_state.current_player
-        matching_traps = []
-        history_len = len(game_state.move_history)
+        self.id_to_trap_map = {trap.id: trap for trap in self.all_traps}
+        
+        # 2. Încercăm să încărcăm indexul din cache
+        if not self._load_index_from_cache():
+            # Dacă încărcarea eșuează sau cache-ul este invalid, construim indexul
+            print("[TRAP SERVICE] Cache not found or invalid. Building new position index...")
+            self.position_index = self._create_position_index()
+            # Și îl salvăm pentru data viitoare
+            self._save_index_to_cache()
+        
+        end_time = time.time()
+        print(f"[TRAP SERVICE] Initialization complete in {end_time - start_time:.4f} seconds.")
+        if self.all_traps:
+            print(f"               Using index for {len(self.all_traps)} traps across {len(self.position_index)} unique positions.")
+
+    def _load_index_from_cache(self) -> bool:
+        """
+        Tries to load the position index from a cache file.
+        Returns True if successful and the cache is valid, False otherwise.
+        """
+        if not os.path.exists(self.CACHE_FILE_PATH):
+            print("[TRAP SERVICE] Cache file not found.")
+            return False
+            
+        try:
+            with open(self.CACHE_FILE_PATH, 'rb') as f:
+                print(f"[TRAP SERVICE] Reading cache file: {self.CACHE_FILE_PATH}")
+                cache_data = pickle.load(f)
+            
+            cached_trap_count = cache_data['trap_count']
+            cached_id_sum = cache_data['id_sum']
+            
+            # Validarea cache-ului
+            current_trap_count = len(self.all_traps)
+            current_id_sum = sum(trap.id for trap in self.all_traps if trap.id is not None)
+            
+            if current_trap_count == cached_trap_count and current_id_sum == cached_id_sum:
+                # Cache-ul este valid! Îl folosim.
+                self.position_index = cache_data['index']
+                print("[TRAP SERVICE] Cache is valid and loaded successfully.")
+                return True
+            else:
+                # Cache-ul este invalid (datele din DB s-au schimbat)
+                print("[TRAP SERVICE] Cache is stale. DB has changed.")
+                return False
+                
+        except (pickle.UnpicklingError, KeyError, EOFError) as e:
+            # Fișierul de cache este corupt sau are un format vechi
+            print(f"[TRAP SERVICE] Cache file is corrupt or invalid: {e}. It will be rebuilt.")
+            return False
+
+    def _save_index_to_cache(self) -> None:
+        """
+        Saves the current position index and validation data to the cache file.
+        """
+        if not hasattr(self, 'position_index') or not self.position_index:
+            print("[TRAP SERVICE] Index is empty, not saving cache.")
+            return
+            
+        print(f"[TRAP SERVICE] Saving new index to cache file: {self.CACHE_FILE_PATH}")
+        
+        cache_data = {
+            'trap_count': len(self.all_traps),
+            'id_sum': sum(trap.id for trap in self.all_traps if trap.id is not None),
+            'index': self.position_index
+        }
+        
+        try:
+            with open(self.CACHE_FILE_PATH, 'wb') as f:
+                pickle.dump(cache_data, f, protocol=pickle.HIGHEST_PROTOCOL)
+            print("[TRAP SERVICE] Cache saved successfully.")
+        except IOError as e:
+            print(f"[TRAP SERVICE] [ERROR] Could not write cache file: {e}")
+
+    def _create_position_index(self) -> Dict[str, List[Tuple[int, int]]]:
+        """
+        Pre-processes all traps to create a map from a position's FEN
+        to the traps and move indices that result in that position.
+        """
+        index_start_time = time.time()
+        index = defaultdict(list)
+        
         for trap in self.all_traps:
-            if (trap.color == target_color and
-                len(trap.moves) > history_len and
-                trap.moves[:history_len] == game_state.move_history):
-                matching_traps.append(trap)
-        return matching_traps
+            if trap.id is None: continue # Skip traps without an ID (should not happen with DB)
+            
+            board = chess.Board()
+            try:
+                for i, move_san in enumerate(trap.moves):
+                    move = board.parse_san(move_san)
+                    board.push(move)
+                    positional_fen = board.shredder_fen()
+                    index[positional_fen].append((trap.id, i))
+            except ValueError:
+                # Optional: log invalid traps
+                # print(f"[INDEX WARNING] Skipping trap ID {trap.id} due to invalid move.")
+                continue
+                
+        index_end_time = time.time()
+        print(f"[TRAP SERVICE] Indexing took {index_end_time - index_start_time:.2f} seconds.")
+        return index
+
+    def _get_matches_for_current_position(self, game_state: GameState) -> List[Tuple[ChessTrap, int]]:
+        """
+        Helper method to find all trap matches for the current board state using the index.
+        Returns a list of (trap_object, move_index_in_trap).
+        """
+        if game_state.is_recording or not hasattr(self, 'position_index'):
+            return []
+            
+        current_fen = game_state.board.shredder_fen()
+        matching_entries = self.position_index.get(current_fen, [])
+        
+        results = []
+        for trap_id, move_index in matching_entries:
+            trap = self.id_to_trap_map.get(trap_id)
+            if trap and trap.color == game_state.current_player:
+                results.append((trap, move_index))
+        return results
 
     def count_matching_traps(self, game_state: GameState) -> int:
-        """Numără toate capcanele care se potrivesc cu poziția curentă."""
-        # La începutul jocului (fără mutări), numără toate capcanele pentru jucătorul curent
-        if not game_state.move_history:
-            return sum(1 for trap in self.all_traps if trap.color == game_state.current_player)
-        return len(self._get_matching_traps(game_state))
+        """Numără capcanele care se potrivesc cu poziția curentă, folosind indexul."""
+        if not self.all_traps:
+            return 0
+            
+        # La începutul jocului, FEN-ul este unic, deci putem folosi logica nouă
+        if game_state.board.fullmove_number == 1 and game_state.board.turn == chess.WHITE:
+             return sum(1 for trap in self.all_traps if trap.color == game_state.current_player)
+
+        return len(self._get_matches_for_current_position(game_state))
 
     def get_aggregated_suggestions(self, game_state: GameState) -> List[MoveSuggestion]:
-        if game_state.board.turn != game_state.current_player: return []
-        
-        matching_traps = self._get_matching_traps(game_state)
-        history_len = len(game_state.move_history)
+        """Obține sugestii agregate folosind noul index de poziții."""
+        if game_state.board.turn != game_state.current_player:
+            return []
+            
+        matches = self._get_matches_for_current_position(game_state)
         move_groups = defaultdict(list)
         
-        # Următoarea mutare trebuie să fie a jucătorului
-        if (history_len % 2 == 0 and game_state.current_player == chess.WHITE) or \
-           (history_len % 2 != 0 and game_state.current_player == chess.BLACK):
-            for trap in matching_traps:
-                next_move = trap.moves[history_len]
-                move_groups[next_move].append(trap)
-                
+        for trap, move_index in matches:
+            # Sugestia este următoarea mutare din linia capcanei
+            if len(trap.moves) > move_index + 1:
+                next_move = trap.moves[move_index + 1]
+                move_groups[next_move].append(trap.moves[move_index + 1:])
+        
         suggestions = []
-        for move_san, traps in move_groups.items():
+        for move_san, continuations in move_groups.items():
             suggestions.append(MoveSuggestion(
                 suggested_move=move_san,
-                trap_count=len(traps),
-                example_trap_line=traps[0].moves[history_len:]
+                trap_count=len(continuations),
+                example_trap_line=continuations[0] # Păstrăm un exemplu de continuare
             ))
+            
         suggestions.sort(key=lambda s: s.trap_count, reverse=True)
         return suggestions
 
     def get_most_common_response(self, game_state: GameState) -> Optional[str]:
-        if game_state.board.turn == game_state.current_player: return None
+        """Găsește cel mai comun răspuns al adversarului folosind indexul."""
+        if game_state.board.turn == game_state.current_player:
+            return None
 
-        matching_traps = self._get_matching_traps(game_state)
-        history_len = len(game_state.move_history)
+        matches = self._get_matches_for_current_position(game_state)
         response_counts = defaultdict(int)
         
-        # Următoarea mutare trebuie să fie a adversarului
-        if (history_len % 2 != 0 and game_state.current_player == chess.WHITE) or \
-           (history_len % 2 == 0 and game_state.current_player == chess.BLACK):
-            for trap in matching_traps:
-                if len(trap.moves) > history_len:
-                    opponent_response_san = trap.moves[history_len]
-                    response_counts[opponent_response_san] += 1
+        for trap, move_index in matches:
+            # Răspunsul adversarului este următoarea mutare din linie
+            if len(trap.moves) > move_index + 1:
+                opponent_response_san = trap.moves[move_index + 1]
+                response_counts[opponent_response_san] += 1
         
-        if not response_counts: return None
-        return max(response_counts, key=response_counts.get)
-
-    def audit_and_correct_database(self, max_moves_limit: int) -> AuditResults:
-        """
-        Performs a full audit, repair, and cleanup of the database.
-        - Removes perfect duplicates, keeping only one instance.
-        - Deletes traps longer than max_moves_limit.
-        - Repairs traps missing '#' if the last move is a valid checkmate.
-        - Deletes traps if the last move is not a checkmate.
-        - Verifies and corrects the winner's color.
-        """
-        print(f"[DB REPAIR] Starting full database audit & repair with max_moves = {max_moves_limit}...")
-        all_traps = self.repository.get_all_traps()
-        results = AuditResults(total_traps_checked=len(all_traps))
-
-        ids_to_delete = set()
-        moves_to_repair = []  # List of (new_moves_json, trap_id)
-        colors_to_correct = []  # List of (new_color_int, trap_id)
-
-        # --- NOU: Faza 1 - Detectarea și marcarea duplicatelor ---
-        print("[DB REPAIR] Phase 1: Checking for perfect duplicates...")
-        signatures_map = defaultdict(list)
-        for trap in all_traps:
-            # O semnătură unică este definită de mutări și de culoarea câștigătoare
-            signature = (json.dumps(trap.moves), int(trap.color))
-            signatures_map[signature].append(trap.id)
-
-        duplicate_ids_to_remove = set()
-        for signature, ids in signatures_map.items():
-            if len(ids) > 1:
-                # Am găsit duplicate. Păstrăm unul (cel cu ID-ul cel mai mic) și le ștergem pe restul.
-                ids.sort()
-                duplicate_ids_to_remove.update(ids[1:])
-        
-        if duplicate_ids_to_remove:
-            print(f"[DB REPAIR] Found and marked {len(duplicate_ids_to_remove)} duplicate traps for deletion.")
-            ids_to_delete.update(duplicate_ids_to_remove)
-            results.duplicates_removed_count = len(duplicate_ids_to_remove)
-
-        # --- Faza 2 - Validări individuale (lungime, mat, culoare) ---
-        print("[DB REPAIR] Phase 2: Validating individual traps...")
-        for trap in all_traps:
-            # Dacă o capcană este deja marcată pentru ștergere (ca duplicat sau alt motiv), nu o mai procesăm
-            if trap.id in ids_to_delete:
-                continue
-
-            # 1. Verificare lungime -> Marchează pentru ștergere
-            if len(trap.moves) > max_moves_limit:
-                results.traps_too_long.append((trap.id, trap.name))
-                ids_to_delete.add(trap.id)
-                continue  # Trecem la următoarea capcană
-
-            # 2. Verificare și reparație '#'
-            is_valid_checkmate = False
-            if trap.moves:
-                board = chess.Board()
-                try:
-                    for move_san in trap.moves:
-                        # Curățăm '#' temporar pentru a putea fi parsat de bibliotecă
-                        move = board.parse_san(move_san.replace('#', '').replace('+', ''))
-                        board.push(move)
-                    
-                    # Acum verificăm dacă starea finală este mat
-                    if board.is_checkmate():
-                        is_valid_checkmate = True
-                        # Dacă e mat, dar lipsește '#', o marcăm pentru reparație
-                        if not trap.moves[-1].endswith('#'):
-                            repaired_moves = trap.moves.copy()
-                            repaired_moves[-1] += '#'
-                            moves_to_repair.append((json.dumps(repaired_moves), trap.id))
-                            results.checkmates_repaired_count += 1
-                
-                except (ValueError, chess.IllegalMoveError, chess.AmbiguousMoveError) as e:
-                    # Linia de mutări este invalidă, o marcăm pentru ștergere
-                    print(f"[DB REPAIR] Trap ID {trap.id} ('{trap.name}') has invalid moves: {e}. Marking for deletion.")
-                    results.traps_no_checkmate_found.append((trap.id, trap.name))
-                    ids_to_delete.add(trap.id)
-                    continue
-
-            if not is_valid_checkmate:
-                # Dacă linia nu se termină cu mat, este invalidă.
-                results.traps_no_checkmate_found.append((trap.id, trap.name))
-                ids_to_delete.add(trap.id)
-                continue
+        if not response_counts:
+            return None
             
-            # 3. Verificare și corectare culoare (doar pentru capcanele valide rămase)
-            num_moves = len(trap.moves)
-            correct_color = chess.WHITE if (num_moves % 2 != 0) else chess.BLACK
-            if trap.color != correct_color:
-                results.traps_wrong_color_found.append((trap.id, trap.name))
-                colors_to_correct.append((int(correct_color), trap.id))
-
-        # --- Executăm operațiunile pe baza de date în batch-uri ---
-        
-        # Ștergem capcanele invalide și duplicatele
-        if ids_to_delete:
-            deleted_count = self.repository.batch_delete_traps(list(ids_to_delete))
-            results.traps_deleted_count = deleted_count
-            print(f"[DB REPAIR] Deleted a total of {deleted_count} traps.")
-        
-        # Reparăm simbolurile de mat lipsă
-        if moves_to_repair:
-            repaired_count = self.repository.batch_update_trap_moves(moves_to_repair)
-            # results.checkmates_repaired_count este deja setat mai sus
-            print(f"[DB REPAIR] Repaired checkmate symbol for {repaired_count} traps.")
-
-        # Corectăm culorile
-        if colors_to_correct:
-            corrected_count = self.repository.batch_update_trap_colors(colors_to_correct)
-            results.colors_corrected_count = corrected_count
-            print(f"[DB REPAIR] Corrected color for {corrected_count} traps.")
-        
-        print("[DB REPAIR] Audit & Repair complete.")
-        return results
-
+        return max(response_counts, key=response_counts.get)
 
 class PGNImportService:
     """Service for importing traps from PGN files."""
@@ -572,113 +481,23 @@ class PGNImportService:
         self.repository = repository
     
     def import_from_file(self, file_path: str, max_moves: int = 25, checkmate_only: bool = False, progress_callback=None) -> Tuple[int, int]:
-        """
-        Orchestrates the import: parses the PGN in parallel, collects ALL results,
-        then writes them to the database in sequential batches.
-        """
-        print(f"[DEBUG PGN] Starting BATCH import from: {file_path}")
+        """Import traps from a single PGN file."""
+        print(f"[DEBUG PGN] Starting import from: {file_path}")
+        
         try:
-            # Pasul 1: Parsează tot fișierul în paralel și colectează rezultatele de la TOȚI workerii
-            # Această metodă acum returnează o listă de liste de capcane.
-            # Ex: [[w1_traps, b1_traps], [w2_traps, b2_traps], ...]
-            all_worker_results = self._parse_pgn_file(file_path, max_moves, checkmate_only)
+            white_traps, black_traps = self._parse_pgn_file(file_path, max_moves, checkmate_only)
             
-            total_white_imported = 0
-            total_black_imported = 0
-
-            if not all_worker_results:
-                print("[DEBUG PGN] No traps found after parsing.")
-                return 0, 0
-
-            # Pasul 2: Scrie rezultatele în baza de date, un lot (de la un worker) pe rând
-            print(f"\n[DEBUG PGN] All {len(all_worker_results)} workers finished. Starting sequential database writes...")
+            white_imported = self.repository.import_traps(white_traps)
+            black_imported = self.repository.import_traps(black_traps)
             
-            for i, (worker_white_traps, worker_black_traps) in enumerate(all_worker_results):
-                batch_to_write = worker_white_traps + worker_black_traps
-                if not batch_to_write:
-                    continue # Sari peste loturile goale
-                
-                print(f"  > Writing batch {i+1}/{len(all_worker_results)} (contains {len(batch_to_write)} traps)...")
-                
-                # Folosim metoda existentă `import_traps` pentru a scrie un singur lot
-                imported_count = self.repository.import_traps(batch_to_write)
-                
-                # Calculăm aproximativ câte au fost albe/negre din cele importate
-                # Acest calcul rămâne o aproximare, dar este suficient de bun
-                if imported_count > 0:
-                    white_ratio = len(worker_white_traps) / len(batch_to_write) if batch_to_write else 0
-                    white_in_batch = int(imported_count * white_ratio)
-                    black_in_batch = imported_count - white_in_batch
-                    total_white_imported += white_in_batch
-                    total_black_imported += black_in_batch
-
-            print("\n[DEBUG PGN] BATCH import completed.")
-            print(f"[DEBUG PGN] Total imported from this file: ~{total_white_imported} white, ~{total_black_imported} black")
-            return total_white_imported, total_black_imported
+            print(f"[DEBUG PGN] Import completed: {white_imported} white, {black_imported} black")
+            return white_imported, black_imported
             
         except Exception as e:
-            print(f"[DEBUG PGN ERROR] A critical error occurred during BATCH import: {e}")
+            print(f"[DEBUG PGN ERROR] Import failed: {e}")
             import traceback
             traceback.print_exc()
             return 0, 0
-
-    def _parse_pgn_file(self, file_path: str, max_moves: int, checkmate_only: bool) -> List[Tuple[List[ChessTrap], List[ChessTrap]]]:
-        """
-        Reads a PGN file, splits it into chunks, processes them in parallel,
-        and returns a list containing the results from each worker.
-        """
-        print(f"[DEBUG PGN PARSE] Opening file with MULTICORE method: {file_path}")
-        
-        # Citim și împărțim jocurile în chunk-uri (la fel ca înainte)
-        game_strings = []
-        try:
-            with open(file_path, 'r', encoding='utf-8', errors='ignore') as pgn_file:
-                current_game_lines = []
-                for line in pgn_file:
-                    line = line.strip()
-                    if line.startswith('[') or line:
-                        current_game_lines.append(line)
-                    elif current_game_lines:
-                        game_strings.append('\n'.join(current_game_lines))
-                        current_game_lines = []
-                if current_game_lines:
-                    game_strings.append('\n'.join(current_game_lines))
-        except FileNotFoundError:
-            print(f"[ERROR] PGN file not found: {file_path}")
-            return []
-        
-        print(f"[DEBUG PGN PARSE] Found {len(game_strings)} games to process.")
-        
-        if not game_strings:
-            return []
-
-        num_workers = min(cpu_count() - 1, 12)
-        chunk_size = max(1000, len(game_strings) // (num_workers * 2)) # Chunk-uri mai mari pentru mai puține task-uri
-        chunks = [game_strings[i:i + chunk_size] for i in range(0, len(game_strings), chunk_size)]
-        
-        all_results = []
-        
-        print(f"[DEBUG PGN PARSE] Using {num_workers} workers with {len(chunks)} chunks.")
-        start_time = time.time()
-        
-        with ProcessPoolExecutor(max_workers=num_workers) as executor:
-            # Trimitem toate chunk-urile la procesare
-            futures = [executor.submit(self._process_games_chunk, chunk, max_moves, checkmate_only) for chunk in chunks]
-            
-            # Colectăm toate rezultatele pe măsură ce se finalizează
-            for i, future in enumerate(as_completed(futures)):
-                try:
-                    result = future.result()
-                    all_results.append(result)
-                    print(f"  ... worker finished processing chunk {i+1}/{len(chunks)}.")
-                except Exception as e:
-                    print(f"[DEBUG PGN PARSE] Error processing a chunk: {e}")
-        
-        elapsed = time.time() - start_time
-        total_traps_found = sum(len(r[0]) + len(r[1]) for r in all_results)
-        print(f"[DEBUG PGN PARSE] All workers completed in {elapsed:.2f} seconds. Found {total_traps_found} potential traps.")
-        
-        return all_results
     
     def import_from_folder(self, folder_path: str, max_moves: int = 25, checkmate_only: bool = False) -> Tuple[int, int]:
         """Import traps from all PGN files in a folder using parallel processing."""
@@ -691,40 +510,34 @@ class PGNImportService:
             print(f"[DEBUG FOLDER] No PGN files found in {folder_path}")
             return 0, 0
         
-        print(f"[DEBUG FOLDER] Found {len(pgn_files)} PGN files to process with settings: max_moves={max_moves}, checkmate_only={checkmate_only}")
+        print(f"[DEBUG FOLDER] Found {len(pgn_files)} PGN files to process...")
         start_time = time.time()
         
-        # Procesăm fișierele în paralel
-        # Limităm numărul de procese pentru a nu suprasolicita sistemul
-        max_workers = max(1, cpu_count() - 1)
+        # Procesăm fișierele în paralel (dar nu prea multe deodată pentru a evita probleme de memorie)
+        max_concurrent_files = min(4, cpu_count() // 2)  # Procesăm max 4 fișiere simultan
         
-        with ProcessPoolExecutor(max_workers=max_workers) as executor:
-            # Trimitem fiecare fișier la procesare cu setările curente
+        with ProcessPoolExecutor(max_workers=max_concurrent_files) as executor:
             future_to_file = {
                 executor.submit(self.import_from_file, str(pgn_file), max_moves, checkmate_only): pgn_file
                 for pgn_file in pgn_files
             }
             
-            processed_count = 0
             for future in as_completed(future_to_file):
                 pgn_file = future_to_file[future]
-                processed_count += 1
                 try:
                     white_count, black_count = future.result()
                     total_white += white_count
                     total_black += black_count
-                    # Afișăm progresul în consolă
-                    print(f"[DEBUG FOLDER] [{processed_count}/{len(pgn_files)}] Completed: {pgn_file.name} -> +{white_count} white, +{black_count} black.")
+                    print(f"[DEBUG FOLDER] Completed: {pgn_file.name} - {white_count} white, {black_count} black")
                 except Exception as e:
                     print(f"[DEBUG FOLDER] Error processing {pgn_file.name}: {e}")
         
         elapsed = time.time() - start_time
-        print(f"\n[DEBUG FOLDER] --- FOLDER IMPORT SUMMARY ---")
+        print(f"\n[DEBUG FOLDER] SUMMARY:")
         print(f"- Files processed: {len(pgn_files)}")
-        print(f"- Total new white traps: {total_white}")
-        print(f"- Total new black traps: {total_black}")
+        print(f"- White traps found: {total_white}")
+        print(f"- Black traps found: {total_black}")
         print(f"- Total time: {elapsed:.2f} seconds")
-        print(f"-------------------------------------\n")
         
         return total_white, total_black
     
@@ -792,6 +605,7 @@ class PGNImportService:
         
         return white_traps, black_traps
 
+
     @staticmethod
     def _process_games_chunk(game_strings: List[str], max_moves: int, checkmate_only: bool) -> Tuple[List[ChessTrap], List[ChessTrap]]:
         """Process a chunk of games. This runs in a separate process."""
@@ -840,6 +654,190 @@ class PGNImportService:
                 continue
         
         return white_traps, black_traps
+
+@dataclass
+class OpeningInfo:
+    """Informații despre o deschidere."""
+    name: str
+    eco_code: str
+    category: str  # "Open", "Semi-Open", "Closed", "Indian", "Flank", etc.
+  
+class DatabaseAuditor:
+    """
+    Handles the verification and cleaning of the traps database.
+    """
+    def __init__(self, repository: TrapRepository):
+        self.repository = repository
+
+    def run_audit(self, max_moves: int) -> Tuple[str, bool]:
+        """
+        Runs all audit checks and returns a summary report and a boolean
+        indicating if any changes were made to the database.
+        """
+        print("[AUDIT] Starting database audit...")
+        start_time = time.time()
+        
+        # Flag pentru a urmări dacă facem vreo modificare
+        changes_made = False
+        
+        all_traps = self.repository.get_all_traps()
+        if not all_traps:
+            return "Audit Complete: The database is empty.", False
+
+        # ... (logica de a găsi duplicate, color_updates, etc. rămâne identică) ...
+        seen_signatures = set()
+        duplicate_ids = []
+        for trap in all_traps:
+            signature = (json.dumps(trap.moves), trap.color)
+            if signature in seen_signatures:
+                duplicate_ids.append(trap.id)
+            else:
+                seen_signatures.add(signature)
+        
+        color_updates = []
+        no_checkmate_ids = []
+        too_long_ids = []
+        
+        for trap in all_traps:
+            if trap.id in duplicate_ids:
+                continue
+            if not trap.moves or not trap.moves[-1].endswith('#'):
+                no_checkmate_ids.append(trap.id)
+                continue
+            num_moves = len(trap.moves)
+            expected_color = chess.WHITE if num_moves % 2 != 0 else chess.BLACK
+            if trap.color != expected_color:
+                color_updates.append((expected_color, trap.id))
+            if num_moves > max_moves:
+                too_long_ids.append(trap.id)
+
+        # --- Perform Database Operations ---
+        all_ids_to_delete = set(duplicate_ids) | set(no_checkmate_ids) | set(too_long_ids)
+        
+        if all_ids_to_delete:
+            print(f"[AUDIT] Deleting {len(all_ids_to_delete)} invalid or duplicate traps.")
+            self.repository.delete_traps_by_ids(list(all_ids_to_delete))
+            changes_made = True  # AM FĂCUT MODIFICĂRI!
+
+        if color_updates:
+            print(f"[AUDIT] Correcting color for {len(color_updates)} traps.")
+            self.repository.update_trap_colors(color_updates)
+            changes_made = True  # AM FĂCUT MODIFICĂRI!
+            
+        elapsed = time.time() - start_time
+        print(f"[AUDIT] Audit finished in {elapsed:.2f} seconds. Changes made: {changes_made}")
+
+        # --- Generate Report ---
+        report = (
+            f"Audit Complete!\n\n"
+            f"  - Duplicates removed: {len(duplicate_ids)}\n"
+            f"  - Color mismatches fixed: {len(color_updates)}\n"
+            f"  - Traps without '#' removed: {len(no_checkmate_ids)}\n"
+            f"  - Traps longer than {max_moves} moves removed: {len(too_long_ids)}\n\n"
+            f"Total entries removed: {len(all_ids_to_delete)}\n"
+            f"Database was modified: {'Yes' if changes_made else 'No'}"
+        )
+        return report, changes_made
+
+class OpeningDatabase:
+    """Bază de date eficientă pentru deschideri, cu un dicționar îmbogățit."""
+    
+    def __init__(self):
+        # Folosim un dicționar unde cheia este tuple de mutări
+        self.openings: Dict[Tuple[str, ...], OpeningInfo] = {}
+        self._load_openings()
+        print(f"[DEBUG INIT] Opening database loaded with {len(self.openings)} entries.")
+        
+    def _load_openings(self):
+        """Încarcă toate deschiderile. Organizat pe categorii pentru claritate."""
+        
+        # --- DESCHIDERI DESCHISE (1.e4 e5) ---
+        self.openings[("e4", "e5")] = OpeningInfo("King's Pawn Game", "C20", "Open")
+        self.openings[("e4", "e5", "Nf3")] = OpeningInfo("King's Knight Opening", "C40", "Open")
+        self.openings[("e4", "e5", "Nf3", "Nc6")] = OpeningInfo("Italian/Spanish Base", "C44", "Open")
+        self.openings[("e4", "e5", "Nf3", "Nc6", "Bb5")] = OpeningInfo("Spanish (Ruy Lopez)", "C60", "Open")
+        self.openings[("e4", "e5", "Nf3", "Nc6", "Bb5", "a6")] = OpeningInfo("Spanish: Morphy Defense", "C70", "Open")
+        self.openings[("e4", "e5", "Nf3", "Nc6", "Bb5", "a6", "Ba4", "Nf6")] = OpeningInfo("Spanish: Closed", "C78", "Open")
+        self.openings[("e4", "e5", "Nf3", "Nc6", "Bc4")] = OpeningInfo("Italian Game", "C50", "Open")
+        self.openings[("e4", "e5", "Nf3", "Nc6", "Bc4", "Bc5")] = OpeningInfo("Italian: Giuoco Piano", "C53", "Open")
+        self.openings[("e4", "e5", "Nf3", "Nc6", "Bc4", "Nf6")] = OpeningInfo("Italian: Two Knights", "C55", "Open")
+        self.openings[("e4", "e5", "Nf3", "Nc6", "Bc4", "Nf6", "Ng5", "d5", "exd5", "Na5")] = OpeningInfo("Two Knights: Polerio", "C58", "Open")
+        self.openings[("e4", "e5", "Nf3", "Nc6", "Bc4", "Nf6", "Ng5", "d5", "exd5", "Nxd5", "Nxf7")] = OpeningInfo("Fried Liver Attack!", "C57", "Open")
+        self.openings[("e4", "e5", "Nf3", "Nc6", "d4")] = OpeningInfo("Scotch Game", "C44", "Open")
+        self.openings[("e4", "e5", "Nf3", "Nc6", "d4", "exd4", "c3")] = OpeningInfo("Scotch Gambit", "C44", "Open")
+        self.openings[("e4", "e5", "Nf3", "Nf6")] = OpeningInfo("Petrov's Defense", "C42", "Open")
+        self.openings[("e4", "e5", "Nc3")] = OpeningInfo("Vienna Game", "C25", "Open")
+        self.openings[("e4", "e5", "f4")] = OpeningInfo("King's Gambit", "C30", "Open")
+        self.openings[("e4", "e5", "f4", "exf4")] = OpeningInfo("King's Gambit Accepted", "C33", "Open")
+        self.openings[("e4", "e5", "f4", "d5")] = OpeningInfo("King's Gambit Declined", "C30", "Open")
+
+        # --- DESCHIDERI SEMI-DESCHISE (1.e4 altceva) ---
+        self.openings[("e4", "c5")] = OpeningInfo("Sicilian Defense", "B20", "Semi-Open")
+        self.openings[("e4", "c5", "Nf3", "d6", "d4", "cxd4", "Nxd4", "Nf6", "Nc3", "a6")] = OpeningInfo("Sicilian: Najdorf", "B90", "Semi-Open")
+        self.openings[("e4", "c5", "Nf3", "d6", "d4", "cxd4", "Nxd4", "Nf6", "Nc3", "g6")] = OpeningInfo("Sicilian: Dragon", "B70", "Semi-Open")
+        self.openings[("e4", "c5", "Nf3", "Nc6", "d4", "cxd4", "Nxd4", "Nf6", "Nc3", "e5")] = OpeningInfo("Sicilian: Sveshnikov", "B33", "Semi-Open")
+        self.openings[("e4", "c5", "Nf3", "Nc6", "Bb5")] = OpeningInfo("Sicilian: Rossolimo", "B31", "Semi-Open")
+        self.openings[("e4", "c5", "Nc3")] = OpeningInfo("Sicilian: Closed", "B23", "Semi-Open")
+        self.openings[("e4", "c5", "c3")] = OpeningInfo("Sicilian: Alapin", "B22", "Semi-Open")
+        self.openings[("e4", "e6")] = OpeningInfo("French Defense", "C00", "Semi-Open")
+        self.openings[("e4", "e6", "d4", "d5")] = OpeningInfo("French Defense", "C00", "Semi-Open")
+        self.openings[("e4", "e6", "d4", "d5", "e5")] = OpeningInfo("French: Advance", "C02", "Semi-Open")
+        self.openings[("e4", "e6", "d4", "d5", "Nc3", "Bb4")] = OpeningInfo("French: Winawer", "C15", "Semi-Open")
+        self.openings[("e4", "e6", "d4", "d5", "Nd2")] = OpeningInfo("French: Tarrasch", "C03", "Semi-Open")
+        self.openings[("e4", "e6", "d4", "d5", "exd5")] = OpeningInfo("French: Exchange", "C01", "Semi-Open")
+        self.openings[("e4", "c6")] = OpeningInfo("Caro-Kann Defense", "B10", "Semi-Open")
+        self.openings[("e4", "c6", "d4", "d5", "e5")] = OpeningInfo("Caro-Kann: Advance", "B12", "Semi-Open")
+        self.openings[("e4", "c6", "d4", "d5", "Nc3", "dxe4", "Nxe4", "Bf5")] = OpeningInfo("Caro-Kann: Classical", "B18", "Semi-Open")
+        
+        # --- DESCHIDERI ÎNCHISE & INDIENE (1.d4) ---
+        self.openings[("d4", "d5")] = OpeningInfo("Queen's Pawn Game", "D00", "Closed")
+        self.openings[("d4", "d5", "c4")] = OpeningInfo("Queen's Gambit", "D06", "Closed")
+        self.openings[("d4", "d5", "c4", "e6")] = OpeningInfo("Queen's Gambit Declined", "D30", "Closed")
+        self.openings[("d4", "d5", "c4", "e6", "Nc3", "Nf6", "cxd5", "exd5", "Bg5")] = OpeningInfo("QGD: Exchange, Main Line", "D35", "Closed")
+        self.openings[("d4", "d5", "c4", "e6", "Nc3", "c5")] = OpeningInfo("QGD: Tarrasch Defense", "D32", "Closed")
+        self.openings[("d4", "d5", "c4", "dxc4")] = OpeningInfo("Queen's Gambit Accepted", "D20", "Closed")
+        self.openings[("d4", "d5", "c4", "c6")] = OpeningInfo("Slav Defense", "D10", "Closed")
+        self.openings[("d4", "d5", "Nf3", "Nf6", "Bf4")] = OpeningInfo("London System", "D02", "Closed")
+        self.openings[("d4", "f5")] = OpeningInfo("Dutch Defense", "A80", "Indian")
+        
+        self.openings[("d4", "Nf6")] = OpeningInfo("Indian Defense", "A45", "Indian")
+        self.openings[("d4", "Nf6", "c4", "e6", "Nc3", "Bb4")] = OpeningInfo("Nimzo-Indian Defense", "E20", "Indian")
+        self.openings[("d4", "Nf6", "c4", "e6", "Nf3", "b6")] = OpeningInfo("Queen's Indian Defense", "E12", "Indian")
+        self.openings[("d4", "Nf6", "c4", "g6", "Nc3", "d5")] = OpeningInfo("Grünfeld Defense", "D80", "Indian")
+        self.openings[("d4", "Nf6", "c4", "g6", "Nc3", "Bg7", "e4", "d6")] = OpeningInfo("King's Indian Defense", "E90", "Indian")
+        
+        # --- DESCHIDERI FLANK ---
+        self.openings[("c4",)] = OpeningInfo("English Opening", "A10", "Flank")
+        self.openings[("c4", "e5")] = OpeningInfo("English: King's English", "A20", "Flank")
+        self.openings[("c4", "c5")] = OpeningInfo("English: Symmetrical", "A30", "Flank")
+        self.openings[("Nf3",)] = OpeningInfo("Réti Opening", "A04", "Flank")
+        self.openings[("Nf3", "d5", "g3")] = OpeningInfo("Réti: King's Indian Attack", "A07", "Flank")
+
+    def get_opening_name(self, moves: List[str]) -> Optional[OpeningInfo]:
+        """Găsește cea mai specifică deschidere pentru o listă de mutări."""
+        for length in range(len(moves), 0, -1):
+            move_tuple = tuple(moves[:length])
+            if move_tuple in self.openings:
+                return self.openings[move_tuple]
+        return None
+        
+    def get_opening_phase_info(self, moves: List[str]) -> Tuple[str, str]:
+        """Returnează informații despre faza jocului pentru fiecare parte."""
+        opening_info = self.get_opening_name(moves)
+        
+        if not opening_info:
+            if not moves:
+                return "Starting Position", "Starting Position"
+            else:
+                # Folosește ultima deschidere cunoscută dacă nu mai avem potrivire
+                # Caută din nou, dar nu returna 'None'
+                last_known = self.get_opening_name(moves[:-1])
+                if last_known:
+                    return f"{last_known.name}...", f"{last_known.name}..."
+                return "Book moves end", "Book moves end"
+
+        base_text = f"{opening_info.name} ({opening_info.eco_code})"
+        return base_text, base_text
 
 class SettingsService:
     """Service for managing application settings."""
@@ -1244,9 +1242,8 @@ class Renderer:
         surface.blit(title_surface, (panel_rect.x + 10, y_offset))
         y_offset += 40
         
-        # --- MODIFICAREA ESTE AICI ---
-        # Folosim f-string formatting cu `:,` pentru a adăuga separatorul pentru mii (ex: 12345 -> 12,345)
-        count_text = f"Matching traps: {total_matching_traps:,}"
+        # NOU: Afișează numărul de capcane care se potrivesc
+        count_text = f"Matching traps: {total_matching_traps}"
         count_surface = self.small_font.render(count_text, True, (255, 255, 0))
         surface.blit(count_surface, (panel_rect.x + 10, y_offset))
         y_offset += 30
@@ -1268,8 +1265,8 @@ class Renderer:
                 pygame.draw.rect(surface, (60, 60, 60), suggestion_rect_abs)
                 pygame.draw.rect(surface, self.config.BORDER_COLOR, suggestion_rect_abs, 1)
                 
-                # Formatăm și numărul de capcane per sugestie
-                suggestion_text = f"{i+1}. {suggestion.suggested_move} ({suggestion.trap_count:,} traps)"
+                # NOU: Afișează sugestia în format "1. Nf3 (150 traps)"
+                suggestion_text = f"{i+1}. {suggestion.suggested_move} ({suggestion.trap_count} traps)"
                 text_surface = self.small_font.render(suggestion_text, True, self.config.TEXT_COLOR)
                 surface.blit(text_surface, (suggestion_rect_abs.x + 10, suggestion_rect_abs.y + 10))
                 
@@ -1281,33 +1278,63 @@ class Renderer:
             
         return button_rects
     
-    def render_status(self, surface: pygame.Surface, state: GameState) -> None:
-        """Render game status information above the board."""
-        # Mutăm statusul deasupra tablei
-        status_y = self.config.TOP_MARGIN - 40
+    def render_status(self, surface: pygame.Surface, state: GameState, white_info: str, black_info: str) -> None:
+        """Render game status information including opening name from both perspectives."""
         
-        turn_text = "Your turn to move" if state.board.turn == state.current_player else "Opponent's turn"
-        turn_surface = self.font.render(turn_text, True, self.config.TEXT_COLOR)
+        # Stabilește culoarea textului pentru fiecare parte
+        white_text_color = (255, 255, 255)
+        black_text_color = (220, 220, 220)
         
-        status_rect = pygame.Rect(self.config.LEFT_MARGIN, status_y, self.config.BOARD_SIZE, 35)
+        # Perspectiva JOS (de obicei albul)
+        bottom_y = self.config.TOP_MARGIN + self.config.BOARD_SIZE + 45
+        bottom_perspective_text = f"♔ {white_info}"
+        bottom_surface = self.font.render(bottom_perspective_text, True, white_text_color)
+        bottom_rect = bottom_surface.get_rect(center=(self.config.LEFT_MARGIN + self.config.BOARD_SIZE // 2, bottom_y))
         
-        text_rect = turn_surface.get_rect(center=status_rect.center)
-        surface.blit(turn_surface, text_rect)
+        # Fundal pentru contrast jos
+        bg_rect_bottom = bottom_rect.inflate(20, 10)
         
+        # Perspectiva SUS (de obicei negrul)
+        top_y = self.config.TOP_MARGIN - 30
+        top_perspective_text = f"♛ {black_info}"
+        top_surface = self.font.render(top_perspective_text, True, black_text_color)
+        top_rect = top_surface.get_rect(center=(self.config.LEFT_MARGIN + self.config.BOARD_SIZE // 2, top_y))
+        
+        # Fundal pentru contrast sus
+        bg_rect_top = top_rect.inflate(20, 10)
+        
+        # Desenează fundalurile
+        pygame.draw.rect(surface, (40, 40, 40), bg_rect_bottom, border_radius=5)
+        pygame.draw.rect(surface, (40, 40, 40), bg_rect_top, border_radius=5)
+        
+        # Desenează textul
+        surface.blit(bottom_surface, bottom_rect)
+        surface.blit(top_surface, top_rect)
+
+        # Evidențiază chenarul jucătorului al cărui rând este
+        highlight_color = (255, 255, 0)
+        if state.board.turn == chess.WHITE:
+            pygame.draw.rect(surface, highlight_color, bg_rect_bottom, 2, border_radius=5)
+        else:
+            pygame.draw.rect(surface, highlight_color, bg_rect_top, 2, border_radius=5)
+        
+        # Textul RECORDING (dacă este cazul)
         if state.is_recording:
             record_text = "RECORDING - Type trap name and press Enter"
             record_surface = self.small_font.render(record_text, True, (255, 100, 100))
-            surface.blit(record_surface, (self.config.LEFT_MARGIN, status_y - 25))
+            record_rect = record_surface.get_rect(centerx=self.config.LEFT_MARGIN + self.config.BOARD_SIZE // 2, y=5)
+            surface.blit(record_surface, record_rect)
 
     def render_history_panel(self, surface: pygame.Surface, move_history: List[str]) -> pygame.Rect:
         """Renders the move history panel below the board with a copy button."""
-        # Calculează poziția panoului sub tablă
-        panel_y = self.config.TOP_MARGIN + self.config.BOARD_SIZE + 15
-        panel_height = self.config.HEIGHT - panel_y - 20
-        # Asigură-te că panoul are o înălțime minimă
-        if panel_height < 60:
-            panel_height = 60
-            panel_y = self.config.HEIGHT - 20 - panel_height
+        # Calculează poziția panoului mai jos, pentru a face loc numelui deschiderii
+        panel_y = self.config.TOP_MARGIN + self.config.BOARD_SIZE + 80 # MODIFICAT de la +15
+        panel_height = self.config.HEIGHT - panel_y - 20 # MODIFICAT pentru a fi dinamic
+        
+        # Asigură-te că panoul are o înălțime minimă și nu depășește ecranul
+        if panel_height < 80: panel_height = 80
+        if panel_y + panel_height > self.config.HEIGHT - 10:
+            panel_height = self.config.HEIGHT - 10 - panel_y
             
         panel_rect = pygame.Rect(self.config.LEFT_MARGIN, panel_y, self.config.BOARD_SIZE, panel_height)
         
@@ -1368,33 +1395,51 @@ class Renderer:
         
         return copy_button_rect
 
-
 if QT_AVAILABLE:
     class QtImportWindow(QDialog):
         """A non-blocking Qt Dialog for PGN import settings."""
         
-        def __init__(self, settings_service, on_start_import, on_clear_db, on_audit_db, parent=None):
+        def __init__(self, settings_service, on_start_import, on_clear_db, on_start_audit, parent=None):
             super().__init__(parent)
-
+            
             self.setWindowTitle("Import & Database Management")
-
+            
             # Stocăm serviciile și funcțiile callback
             self.settings_service = settings_service
             self.on_start_import = on_start_import
             self.on_clear_db = on_clear_db
-            self.on_audit_db = on_audit_db # NOU
-
+            self.on_start_audit = on_start_audit # <--- LINIA NOUĂ DE AICI
+            
             # Variabile interne
             self.full_filepath = ""
             self.settings = self.settings_service.load_settings()
 
             # Layout principal
             self.main_layout = QVBoxLayout(self)
-
+            
             self._create_source_group()
             self._create_filters_group()
             self._create_database_group()
             self._create_actions_group()
+
+
+        def start_audit(self):
+            """Starts the audit process by calling the controller's callback."""
+            try:
+                max_moves = int(self.max_moves_edit.text())
+                if max_moves < 4: raise ValueError
+            except ValueError:
+                QMessageBox.warning(self, "Warning", "Please enter a valid number for max. semi-moves (>= 4) to use as a reference for the audit.")
+                return
+
+            # Salvăm setarea pentru consistență
+            self.settings_service.update_setting("pgn_import_max_moves", max_moves)
+            
+            # Apelăm funcția de start din GameController
+            self.on_start_audit(max_moves)
+            
+            self.accept() # Închide dialogul după ce a pornit auditul
+
 
         def _create_source_group(self):
             group_box = QGroupBox("Import Source")
@@ -1435,18 +1480,21 @@ if QT_AVAILABLE:
         def _create_database_group(self):
             group_box = QGroupBox("Database")
             layout = QHBoxLayout()
-
-            audit_button = QPushButton("Audit DB")
-            audit_button.setStyleSheet("background-color: #82B1FF;") # Culoare albastră
-            audit_button.clicked.connect(self.run_audit) # Conectare la noua funcție
-
+            
             clear_button = QPushButton("Clear All Traps")
-            clear_button.setStyleSheet("background-color: #FF8A80;") # Culoare roșie
+            clear_button.setStyleSheet("background-color: #FF8A80;") # Roșu deschis
             clear_button.clicked.connect(self.on_clear_db)
-
+            
+            # --- Butonul NOU pentru AUDIT ---
+            audit_button = QPushButton("Audit DB")
+            audit_button.setStyleSheet("background-color: #C1A7E2; font-weight: bold;") # Mov
+            audit_button.clicked.connect(self.start_audit) # Conectăm la o funcție nouă
+            
+            # Ordinea butoanelor în interfață
             layout.addWidget(audit_button)
             layout.addWidget(clear_button)
             layout.addStretch()
+            
             group_box.setLayout(layout)
             self.main_layout.addWidget(group_box)
             
@@ -1506,21 +1554,6 @@ if QT_AVAILABLE:
             
             self.accept() # accept() închide dialogul cu succes
 
-        def run_audit(self):
-            """Gets audit parameters and calls the main audit function."""
-            try:
-                max_moves = int(self.max_moves_edit.text())
-                if max_moves < 4: raise ValueError
-            except ValueError:
-                QMessageBox.warning(self, "Warning", "Please enter a valid number for max. semi-moves (>= 4) to use for the audit.")
-                return
-
-            # Salvăm setarea pentru consistență
-            self.settings_service.update_setting("pgn_import_max_moves", max_moves)
-
-            # Apelăm funcția de audit din GameController
-            self.on_audit_db(max_moves)
-
 # Main Game Controller
 class GameController:
     """Main controller that orchestrates the game."""
@@ -1537,6 +1570,8 @@ class GameController:
         
         pygame.init()
         
+        # --- MODIFICARE CHEIE ---
+        # Creăm config-ul, APOI creăm componentele care depind de el
         self.config = UIConfig()
         
         print(f"[DEBUG INIT] UI Config: WIDTH={self.config.WIDTH}, HEIGHT={self.config.HEIGHT}")
@@ -1544,12 +1579,15 @@ class GameController:
         self.trap_service = TrapService(self.trap_repository)
         self.pgn_service = PGNImportService(self.trap_repository)
         self.settings_service = SettingsService()
+        self.opening_db = OpeningDatabase()  # <--- LINIA ADĂUGATĂ AICI
         
         self.screen = pygame.display.set_mode((self.config.WIDTH, self.config.HEIGHT))
         pygame.display.set_caption("Chess Trap Trainer - Clean Architecture")
         
+        # Creăm loader-ul de piese cu noua dimensiune
         self.piece_loader = PieceImageLoader(self.config.SQUARE_SIZE)
         self.input_handler = InputHandler(self.config)
+        # Creăm renderer-ul după ce avem toate componentele
         self.renderer = Renderer(self.config, self.piece_loader)
         
         initial_board = chess.Board()
@@ -1563,11 +1601,8 @@ class GameController:
         self.highlighted_moves = []
         self.copy_button_rect = None
         
-        # Variabile pentru importul secvențial din folder
-        self.folder_import_queue = []
-        self.folder_import_results = {"white": 0, "black": 0, "files_processed": 0, "total_files": 0}
+        print("[DEBUG INIT] GameController initialization complete!")
     
-    print("[DEBUG INIT] GameController initialization complete!")
     
     def run(self) -> None:
         """Main game loop that also manages the Qt event loop."""
@@ -1634,9 +1669,15 @@ class GameController:
                 self.renderer.render_suggestions_panel(
                     self.screen, self.current_suggestions, total_matching
                 )
-                self.renderer.render_status(self.screen, self.current_state)
                 
-                # APEL NOU: Randăm panoul de istoric
+                # --- BLOCUL MODIFICAT ESTE AICI ---
+                # Obținem informațiile despre deschidere de la noul nostru serviciu
+                white_info, black_info = self.opening_db.get_opening_phase_info(self.current_state.move_history)
+                # Pasăm aceste informații către metoda de randare a statusului
+                self.renderer.render_status(self.screen, self.current_state, white_info, black_info)
+                # --- SFÂRȘITUL BLOCULUI MODIFICAT ---
+                
+                # Randăm panoul de istoric
                 self.copy_button_rect = self.renderer.render_history_panel(
                     self.screen, 
                     self.current_state.move_history
@@ -2082,7 +2123,7 @@ class GameController:
             
             # Refresh suggestions
             self._update_suggestions()
-
+    
     def _import_pgn_file(self) -> None:
         """Opens the Qt Import Settings window."""
         if not QT_AVAILABLE:
@@ -2092,32 +2133,31 @@ class GameController:
         # Funcția care va fi apelată de butonul "START IMPORT"
         def start_import_logic(filepath, max_moves, checkmate_only):
             print(f"[IMPORT] Starting import with settings...")
-
             pygame.mouse.set_cursor(pygame.SYSTEM_CURSOR_WAIT)
-
+            
             white_count, black_count = self.pgn_service.import_from_file(filepath, max_moves, checkmate_only)
-
+            
             pygame.mouse.set_cursor(pygame.SYSTEM_CURSOR_ARROW)
-
+            
             QMessageBox.information(None, "Import Complete", f"Successfully imported:\n- {white_count} white traps\n- {black_count} black traps")
-            self.trap_service.all_traps = self.trap_repository.get_all_traps()
+            
+            # După import, forțăm reîmprospătarea datelor
+            if os.path.exists(TrapService.CACHE_FILE_PATH):
+                os.remove(TrapService.CACHE_FILE_PATH)
+            self.trap_service = TrapService(self.trap_repository)
             self._update_suggestions()
 
-        # Creăm și afișăm fereastra de dialog
+        # Creăm și afișăm fereastra de dialog, pasând TOATE callback-urile necesare
         dialog = QtImportWindow(
-            self.settings_service,
-            start_import_logic,
+            self.settings_service, 
+            start_import_logic, 
             self._clear_database,
-            self._run_database_audit  # PASĂM NOUA FUNCȚIE AICI
+            self._run_database_audit  # Pasăm noua funcție de audit aici
         )
-        # .exec() o face modală, dar stabilă datorită integrării Qt
         dialog.exec()
         
     def _import_pgn_folder(self) -> None:
-        """
-        Prepares and starts a sequential, file-by-file folder import, where
-        each file is processed at maximum speed using multiple workers.
-        """
+        """Opens a folder dialog using PySide6 to select a directory."""
         if not QT_AVAILABLE:
             print("[IMPORT] Cannot import folder: PySide6 (Qt) is not available.")
             return
@@ -2125,92 +2165,21 @@ class GameController:
         settings = self.settings_service.load_settings()
         last_directory = settings.get("last_pgn_directory", "")
 
+        # Deschide dialogul de directoare Qt
         folder_path = QFileDialog.getExistingDirectory(
-            None, "Select Folder for Sequential High-Speed Import", last_directory
+            None,
+            "Select Folder with PGN Files",
+            last_directory
         )
 
         if folder_path:
+            print(f"[IMPORT] Folder selected: {folder_path}")
+            QMessageBox.information(None, "Folder Selected", f"You selected:\n{folder_path}")
+            
             self.settings_service.update_setting("last_pgn_directory", folder_path)
-            
-            # Găsește toate fișierele PGN și le pune în coadă
-            self.folder_import_queue = sorted(list(Path(folder_path).glob("*.pgn"))) # Sortăm pentru ordine predictibilă
-            
-            if not self.folder_import_queue:
-                QMessageBox.warning(None, "No Files Found", "No .pgn files were found in the selected directory.")
-                return
-
-            # Resetează rezultatele și pornește procesul
-            total_files = len(self.folder_import_queue)
-            self.folder_import_results = {"white": 0, "black": 0, "files_processed": 0, "total_files": total_files}
-            
-            QMessageBox.information(
-                None, 
-                "Sequential Import Started", 
-                f"Found {total_files} PGN files. Starting to import them one by one, at maximum speed.\n\nCheck the console for progress. The app will remain responsive."
-            )
-
-            # Pornim procesarea primului fișier din coadă
-            self._process_next_job_in_queue()
         else:
             print("[IMPORT] Folder selection cancelled.")
-
-    def _process_next_job_in_queue(self):
-        """
-        Processes the next file (job) in the import queue in a background thread.
-        This orchestrates the sequential execution of high-speed jobs.
-        """
-        # Dacă nu mai sunt fișiere în coadă, afișăm raportul final și ne oprim.
-        if not self.folder_import_queue:
-            print("\n[JOB QUEUE] --- All files processed! ---")
-            
-            # Actualizăm datele finale
-            self.trap_service.all_traps = self.trap_repository.get_all_traps()
-            self._update_suggestions()
-            
-            QMessageBox.information(
-                None,
-                "Folder Import Complete",
-                f"Successfully finished the sequential import.\n\n"
-                f"- Files processed: {self.folder_import_results['total_files']}\n"
-                f"- Total new white traps: {self.folder_import_results['white']:,}\n"
-                f"- Total new black traps: {self.folder_import_results['black']:,}"
-            )
-            pygame.mouse.set_cursor(pygame.SYSTEM_CURSOR_ARROW)
-            return
-
-        # Scoatem următorul fișier din coadă
-        file_to_process = self.folder_import_queue.pop(0)
-        self.folder_import_results["files_processed"] += 1
-        
-        # Funcția care va rula în fundal pentru UN SINGUR JOB
-        def single_job_worker():
-            pygame.mouse.set_cursor(pygame.SYSTEM_CURSOR_WAIT)
-            
-            settings = self.settings_service.load_settings()
-            max_moves = settings.get("pgn_import_max_moves", 25)
-            checkmate_only = settings.get("checkmate_only", False)
-            
-            progress = f"[{self.folder_import_results['files_processed']}/{self.folder_import_results['total_files']}]"
-            print(f"\n[JOB QUEUE] {progress} Starting job for: {file_to_process.name}")
-            
-            # Aici este cheia: apelăm `import_from_file`, care folosește intern multiprocessing.
-            white, black = self.pgn_service.import_from_file(
-                str(file_to_process), max_moves, checkmate_only
-            )
-            
-            # Adăugăm la total
-            self.folder_import_results["white"] += white
-            self.folder_import_results["black"] += black
-            
-            print(f"[JOB QUEUE] {progress} Job finished for: {file_to_process.name}. Found +{white} white, +{black} black.")
-            
-            # Când a terminat, cheamă din nou funcția pentru a procesa următorul JOB
-            self._process_next_job_in_queue()
-
-        # Pornim worker-ul pentru job-ul curent într-un thread nou
-        import_thread = threading.Thread(target=single_job_worker, daemon=True)
-        import_thread.start()
-        
+    
     def _return_to_main_menu(self) -> None:
         """Return to the main menu."""
         self.show_start_screen = True
@@ -2222,66 +2191,40 @@ class GameController:
         )
         self.move_history_forward = []
 
-    def _run_database_audit(self, max_moves_limit: int):
-        """Orchestrates the database audit and displays the results."""
-        if not QT_AVAILABLE:
-            print("[AUDIT] Cannot run audit: PySide6 (Qt) is not available for report display.")
-            return
-
-        # Afișăm un dialog de așteptare
-        progress_dialog = QMessageBox()
-        progress_dialog.setWindowTitle("Auditing & Repairing Database")
-        progress_dialog.setText("The database is being analyzed and repaired. Please wait...")
-        progress_dialog.setStandardButtons(QMessageBox.StandardButton.NoButton)
-        progress_dialog.setModal(True)
-        progress_dialog.show()
-        self.qt_app.processEvents()
-
+    def _run_database_audit(self, max_moves: int):
+        """Orchestrates the database audit and refreshes the application state ONLY if changes were made."""
+        print("[CONTROLLER] Starting database audit process...")
         pygame.mouse.set_cursor(pygame.SYSTEM_CURSOR_WAIT)
 
-        # Rulează auditul și reparația
-        results = self.trap_service.audit_and_correct_database(max_moves_limit)
-
-        # Reîmprospătăm cache-ul de capcane dacă s-au făcut modificări
-        if results.traps_deleted_count > 0 or results.checkmates_repaired_count > 0 or results.colors_corrected_count > 0:
-            print("[AUDIT] Refreshing in-memory trap cache after repairs.")
-            self.trap_service.all_traps = self.trap_repository.get_all_traps()
-            self._update_suggestions()
-
+        # 1. Creează și rulează auditorul
+        auditor = DatabaseAuditor(self.trap_repository)
+        report, changes_were_made = auditor.run_audit(max_moves)
+        
         pygame.mouse.set_cursor(pygame.SYSTEM_CURSOR_ARROW)
-        progress_dialog.hide()
 
-        # Construiește raportul detaliat pentru afișare
-        report_title = "Audit & Repair Report"
-        report = f"Scan Complete!\n\nChecked {results.total_traps_checked} traps.\n"
-        report += "-------------------------------------\n"
-
-        has_actions = False
+        # 2. Afișează raportul
+        QMessageBox.information(self.qt_app.activeWindow(), "Audit Report", report)
         
-        # Secțiunea de reparații și corecții
-        if results.colors_corrected_count > 0:
-            has_actions = True
-            report += f"✅ Corrected winning color for {results.colors_corrected_count} traps.\n"
-        if results.checkmates_repaired_count > 0:
-            has_actions = True
-            report += f"✅ Repaired missing checkmate symbol for {results.checkmates_repaired_count} traps.\n"
-
-        # Secțiunea de ștergeri, acum cu detaliu
-        if results.traps_deleted_count > 0:
-            has_actions = True
-            report += f"\n🗑️ Total traps deleted: {results.traps_deleted_count}\n"
-            if results.duplicates_removed_count > 0:
-                report += f"   - Reason: Removed {results.duplicates_removed_count} duplicate entries.\n"
+        # 3. CRUCIAL: Reîmprospătează datele aplicației DOAR DACĂ A FOST NECESAR
+        if changes_were_made:
+            print("[CONTROLLER] Audit made changes. Refreshing TrapService and suggestions...")
             
-            # Calculăm câte au fost șterse din alte motive (invalide)
-            invalid_deleted_count = results.traps_deleted_count - results.duplicates_removed_count
-            if invalid_deleted_count > 0:
-                report += f"   - Reason: Removed {invalid_deleted_count} invalid lines (too long or no checkmate).\n"
+            # Șterge fișierul cache dacă există, forțând reconstruirea lui
+            if os.path.exists(TrapService.CACHE_FILE_PATH):
+                try:
+                    os.remove(TrapService.CACHE_FILE_PATH)
+                    print("[CONTROLLER] Removed stale cache file.")
+                except OSError as e:
+                    print(f"[CONTROLLER] Error removing cache file: {e}")
 
-        if not has_actions:
-            report += "✅ No issues found. The database is consistent and clean."
-        
-        QMessageBox.information(None, report_title, report)
+            # Re-inițializează serviciul pentru a încărca datele curate
+            self.trap_service = TrapService(self.trap_repository)
+            self._update_suggestions()
+            
+            QMessageBox.information(self.qt_app.activeWindow(), "Success", "Database was modified. Application data has been refreshed.")
+        else:
+            print("[CONTROLLER] Audit found no issues. No refresh needed.")
+            QMessageBox.information(self.qt_app.activeWindow(), "Success", "Database is clean. No changes were made.")
 
 def main():
     """Main entry point."""
@@ -2293,9 +2236,6 @@ def main():
         import traceback
         traceback.print_exc()
 
-# --- MODIFICARE CRITICĂ ---
-# Acest gardian previne executarea codului de mai jos
-# în procesele copil, rezolvând eroarea "database is locked".
 if __name__ == "__main__":
     # Poți comenta auditul după ce ai văzut rezultatul
     # my_line_to_audit = ['e4', 'e5', 'Nf3', 'Nc6', 'Bc4', 'd6', 'Nc3']
