@@ -3,3 +3,4 @@
 build/
 dist/
 app_settings.json
+trap_index.cache

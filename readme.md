@@ -1,159 +1,118 @@
-# Chess Trap Explorer / Antrenor de Capcane de Șah
+# ♟️ Chess Trap Trainer
 
-Un instrument interactiv pentru învățarea și înregistrarea capcanelor de șah, dezvoltat în Python cu Pygame.
+**Chess Trap Trainer** este o aplicație desktop avansată, dezvoltată în Python, concepută pentru a ajuta jucătorii de șah să învețe, să practice și să exploreze o varietate largă de capcane și deschideri.
 
 ![Screenshot aplicație](Capture.PNG) 
 
-## 📋 Caracteristici
+## ✨ Funcționalități Principale
 
-### 🎯 Antrenor de Capcane
-- **Joacă cu Albele sau Negrele** - Alege culoarea preferată
-- **Sugestii automate** - Programul îți sugerează mutările din capcanele cunoscute
-- **Evidențiere vizuală** - Mutările recomandate și țintele sunt evidențiate pe tablă
-- **Biblioteca extensivă** - Suportă capcane stocate în Excel
+### 🎯 **Antrenament Inteligent**
+- **Joacă cu Albele sau Negrele**: Alege culoarea preferată pentru a începe antrenamentul.
+- **Sugestii în Timp Real**: Aplicația îți arată cele mai promițătoare continuări din baza sa de date.
+- **Recunoașterea Transpozițiilor**: Sistemul identifică poziția de pe tablă, nu doar secvența de mutări. Chiar dacă ajungi la o poziție printr-o ordine diferită de mutări, vei primi sugestiile corecte.
+- **Evidențiere Vizuală**:
+  - 🟥 **Roșu**: Evidențiază mutarea sugerată când selectezi o capcană din listă.
+  - 🟩 **Verde**: Evidențiază cel mai comun răspuns al adversarului, ajutându-te să anticipezi.
+- **Bază de Date a Deschiderilor**: Afișează în timp real numele deschiderii care se joacă (ex: "Sicilian: Najdorf"), împreună cu codul ECO corespunzător.
 
-### 📝 Înregistrare de Capcane
-- **Mod înregistrare** - Creează capcane noi jucând ambele părți
-- **Salvare în Excel** - Stochează capcanele în format organizat
-- **Import PGN** - Importă capcane din fișiere PGN (inclusiv Lichess Studies)
-- **Gestionare duplicate** - Verifică automat pentru capcane similare
+### 🗃️ **Management Avansat al Datelor**
+- **Import Masiv de PGN-uri**: Importă mii de capcane din fișiere PGN (inclusiv de pe Lichess, chess.com, etc.). Procesul este extrem de rapid, folosind toate nucleele procesorului.
+- **Gestionare Bază de Date**:
+    - Importă dintr-un singur fișier PGN sau dintr-un folder întreg.
+    - Funcție de **Audit DB** pentru a curăța și repara baza de date (elimină duplicate, corectează culorile, șterge intrările invalide).
+    - Opțiune de a șterge complet baza de date.
+- **Caching Inteligent**: Indexul de poziții este salvat pe disc (`trap_index.cache`) pentru o pornire aproape instantanee a aplicației. Cache-ul este invalidat și reconstruit automat doar dacă baza de date a fost modificată (după un import sau audit).
 
-### 🎮 Interfață Intuitivă
-- **Tablă interactivă** - Drag & drop pentru mutări
-- **Coordonate** - Afișare file și rânduri (a-h, 1-8)
-- **Istoric mutări** - Vizualizează și copiază secvența de mutări
-- **Butoane functionale** - Undo, Restart, Import, Record
+### ✍️ **Înregistrare și Navigare**
+- **Mod Înregistrare**: Creează și salvează propriile capcane direct în baza de date SQLite.
+- **Istoric Complet**: Vizualizează istoricul partidei și copiază-l în clipboard cu un singur click.
+- **Navigare în Partidă**: Sari la început, la sfârșit, sau navighează mutare cu mutare.
+
+## 🛠️ Arhitectură Software
+
+Aplicația este construită folosind principii de **Clean Architecture**, separând clar responsabilitățile în straturi distincte pentru o mentenanță și extindere ușoară:
+- **UI (Interfață Utilizator):** `Renderer`, `InputHandler`, `QtImportWindow`
+- **Controller (`GameController`):** Ordonează fluxul de date.
+- **Services (Servicii):** `TrapService`, `PGNImportService`, `DatabaseAuditor`, `OpeningDatabase`
+- **Repository (`TrapRepository`):** Strat de abstractizare peste baza de date SQLite.
+- **Entities (Entități):** `ChessTrap`, `GameState`, `MoveSuggestion`, etc.
 
 ## 🚀 Instalare
 
-### Dependințe Necesare
-```bash
-pip install pygame chess pandas openpyxl pyperclip pygame-textinput
-```
+Pentru a rula acest proiect, vei avea nevoie de Python 3.8 sau o versiune mai nouă.
 
-### Fișiere Necesare
-1. **Script principal**: `chess_trap_explorer.py`
-2. **Fișier capcane**: `traps.xlsx` (se creează automat)
-3. **Folder imagini**: `pieces/` cu imaginile pieselor (opțional)
+1.  **Clonează repository-ul:**
+    ```bash
+    git clone https://github.com/your-username/chess-trap-trainer.git
+    cd chess-trap-trainer
+    ```
 
-### Structura Folderului
+2.  **Creează un mediu virtual (recomandat):**
+    ```bash
+    python -m venv venv
+    ```
+    *   Pe Windows, activează-l cu: `.\venv\Scripts\activate`
+    *   Pe macOS/Linux, activează-l cu: `source venv/bin/activate`
+
+3.  **Instalează dependențele:**
+    Fișierul `requirements.txt` conține toate pachetele necesare.
+    ```bash
+    pip install -r requirements.txt
+    ```
+
+4.  **Imagini piese (opțional):**
+    Asigură-te că ai un folder numit `pieces` în directorul rădăcină, care conține imaginile pieselor de șah în format PNG (ex: `wp.png` pentru pion alb, `bn.png` pentru cal negru). Dacă folderul sau imaginile lipsesc, programul va afișa piese simple, geometrice.
+
+### 📁 Structura Proiectului
 ```
-chess-trap-explorer/
-├── chess_trap_explorer.py
-├── traps.xlsx
-├── pieces/
-│   ├── wK.png, wQ.png, wR.png, wB.png, wN.png, wP.png
-│   └── bK.png, bQ.png, bR.png, bB.png, bN.png, bP.png
+chess-trap-trainer/
+├── "B Claude .py"          # Scriptul principal al aplicației
+├── chess_traps.db          # Baza de date SQLite (se creează automat)
+├── trap_index.cache        # Fișierul de cache (se creează automat)
+├── requirements.txt        # Lista de dependențe
+├── pieces/                 # Folder cu imaginile pieselor
+│   ├── wK.png, wQ.png, ...
+│   └── bK.png, bQ.png, ...
 └── README.md
 ```
 
 ## 📖 Utilizare
 
-### Pornirea Programului
+Pentru a porni aplicația, rulează scriptul principal:
 ```bash
-python chess_trap_explorer.py
+python "B Claude .py"
 ```
 
-### Modul de Antrenament
-1. **Selectează culoarea** (Albe/Negre) în meniul principal
-2. **Joacă mutările** - Trage piesele pe tablă
-3. **Urmărește sugestiile** din panoul din dreapta
-4. **Observă evidențierile**:
-   - 🟩 **Verde**: Mutări recomandate/ținte
-   - 🟦 **Albastru**: Mutarea selectată din listă
+### Flux de lucru recomandat:
 
-### Înregistrarea Capcanelor
-1. **Apasă "Înregistrează Linie"** pentru a intra în modul record
-2. **Joacă ambele părți** pentru a crea capcana
-3. **Completează numele** și **numărul rândului** pentru salvare
-4. **Apasă din nou butonul** pentru a salva în Excel
+1.  **Populează Baza de Date:** La prima utilizare, aplicația va fi goală. Mergi la `Controls` -> `Import PGN`. Selectează un fișier PGN sau un folder care conține partide terminate cu mat pentru a popula baza de date. Cu cât mai multe partide, cu atât mai "inteligentă" va fi aplicația.
+2.  **Rulează Audit (Opțional):** După un import masiv, este o idee bună să rulezi `Audit DB` pentru a curăța și optimiza baza de date.
+3.  **Începe Antrenamentul:** Din meniul principal, alege culoarea cu care vrei să joci și apasă `Start Game`.
+4.  **Explorează și Învață:**
+    *   Fă mutări pe tablă.
+    *   Panoul din dreapta îți va arăta sugestii de mutări din capcanele cunoscute, sortate după popularitate.
+    *   Click pe o sugestie pentru a o evidenția pe tablă.
+    *   Fă mutarea și observă highlight-ul verde care indică răspunsul probabil al adversarului.
 
-### Import din PGN
-1. **Apasă "Import PGN"**
-2. **Selectează fișierul** .pgn
-3. **Setează limita de mutări** (recomandat: 20-30)
-4. Capcanele se salvează automat în `traps.xlsx`
+## 📦 Dependențe
 
-## 📊 Format Excel
+Proiectul se bazează pe următoarele biblioteci Python:
 
-### Structura Fișierului `traps.xlsx`
-- **Sheet "White"**: Capcane pentru jucătorul cu albele
-- **Sheet "Black"**: Capcane pentru jucătorul cu negrele
-
-### Format Rânduri
-| denumirea | white | black | white | black | ... |
-|-----------|-------|-------|-------|-------|-----|
-| Scholar's Mate | e4 | e5 | Bc4 | Nc6 | Qh5 | ... |
-| Italian Trap | e4 | e5 | Nf3 | Nc6 | Bc4 | ... |
-
-## 🎯 Tipuri de Capcane Suportate
-
-### Capcane de Deschidere
-- **Scholar's Mate** (Mat în 4 mutări)
-- **Légal's Mate** (Sacrificiu de damă)
-- **Italian Game Traps** (Capcane în Italiana)
-- **French Defense Traps** (Capcane în Franceză)
-
-### Capcane de Mijloc
-- **Pin Tactics** (Ținte și clouări)
-- **Fork Traps** (Capcane cu furci)
-- **Discovery Attacks** (Atacuri prin descoperire)
-
-### Import din Lichess Studies
-- Suportă **Lichess Studies** în format PGN
-- Detectează automat **maturile** (#)
-- Organizează capcanele pe **culori**
-
-## 🎨 Personalizare
-
-### Culori Tablă
-- **Joc Live**: Verde închis/Crem
-- **Mod Înregistrare**: Maro clasic
-
-### Evidențieri
-- **Verde**: Mutări așteptate/recomandate
-- **Roșu**: Mutări periculoase/ținte
-- **Albastru**: Selecție utilizator
-
-## 🐛 Troubleshooting
-
-### Probleme Comune
-1. **Imaginile pieselor nu se încarcă**
-   - Verifică existența folderului `pieces/`
-   - Programul folosește fallback text dacă lipsesc imaginile
-
-2. **Excel nu se salvează**
-   - Verifică permisiunile de scriere
-   - Închide Excel dacă ai fișierul deschis
-
-3. **Import PGN eșuează**
-   - Verifică formatul fișierului PGN
-   - Unele PGN-uri au encoding diferit
-
-### Dependințe Opționale
-- **tkinter**: Pentru dialoguri de fișiere (inclus în Python)
-- **Imagini piese**: Fallback la text dacă lipsesc
+*   `pygame`: Pentru motorul grafic și interfața principală a tablei de șah.
+*   `python-chess`: Pentru toată logica de șah (mutări, validări, PGN, FEN).
+*   `PySide6`: Pentru ferestrele de dialog native (import, mesaje de confirmare, audit).
+*   `pygame-textinput`: Pentru câmpul de introducere a numelui capcanei în modul de înregistrare.
+*   `pyperclip`: Pentru funcționalitatea butonului "Copy" din panoul de istoric.
 
 ## 🤝 Contribuții
 
-Contribuțiile sunt binevenite! Te rog să:
-1. **Fork** repository-ul
-2. **Creează** o nouă branc pentru feature
-3. **Commit** modificările
-4. **Trimite** pull request
-
-## 📝 Licență
-
-Acest proiect este open source. Folosește-l liber pentru învățare și îmbunătățire.
-
-## 🎓 Despre
-
-Dezvoltat pentru pasionații de șah care vor să-și îmbunătățească cunoștințele de capcane și tactici. Ideal pentru:
-- **Începători** care învață capcanele de bază
-- **Jucători intermediari** care vor să-și extindă repertoriul
-- **Antrenori** care creează materiale de studiu
-- **Cluburi de șah** pentru sesiuni de antrenament
+Contribuțiile sunt binevenite! Te rog să respecți următorul flux de lucru:
+1.  **Fork** acest repository.
+2.  **Creează** o nouă branch pentru funcționalitatea ta (`git checkout -b feature/NumeFeature`).
+3.  **Commit** modificările tale (`git commit -am 'Add some feature'`).
+4.  **Push** către branch (`git push origin feature/NumeFeature`).
+5.  **Deschide** un Pull Request.
 
 ---
 
-**Mult succes la șah! ♟️**
+**Mult succes la șah!**

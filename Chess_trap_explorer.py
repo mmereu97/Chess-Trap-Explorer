@@ -9,6 +9,7 @@ import os
 import pyperclip
 import pygame_textinput
 import time
+import pickle
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import List, Dict, Optional, Tuple, Protocol
@@ -115,28 +116,28 @@ def audit_specific_line(line_to_check: List[str], db_path="chess_traps.db"):
     print("\n--- AUDIT COMPLETE FOR SPECIFIC LINE ---")
 
 
-# Configuration and Data Classes
+# --- NOUA CONFIGURAȚIE PENTRU 720p (1280x720) ---
 @dataclass
-class UIConfig:
-    """UI configuration constants for 1080p resolution with history panel."""
+class UIConfig: # Numește-o direct UIConfig pentru a fi folosită
+    """UI configuration constants for 720p resolution with history panel."""
     # --- Rezoluția totală ---
-    WIDTH: int = 1920
-    HEIGHT: int = 1080
+    WIDTH: int = 1280
+    HEIGHT: int = 720
     
-    # --- Dimensiuni Panouri ---
-    BUTTONS_WIDTH: int = 280
-    SUGGESTIONS_WIDTH: int = 500
+    # --- Dimensiuni Panouri (scalate cu ~1.5 și rotunjite) ---
+    BUTTONS_WIDTH: int = 200
+    SUGGESTIONS_WIDTH: int = 340
     
     # --- Dimensiuni Tablă și Panou Istoric ---
-    # Lăsăm un spațiu total de 950px pe verticală pentru tablă + istoric
-    BOARD_AREA_HEIGHT: int = 950
-    # Tabla va ocupa o parte din acest spațiu
-    BOARD_SIZE: int = 768
-    SQUARE_SIZE: int = BOARD_SIZE // 8  # 96px per pătrățel
+    # Tabla trebuie să fie cel mai mare pătrat posibil, multiplu de 8.
+    # Înălțimea disponibilă este ~720px. Lățimea: 1280 - 200 - 340 = 740px.
+    # O valoare bună, mai mică de 720, este 576.
+    BOARD_SIZE: int = 576 # 576 este 72 * 8. Este o valoare excelentă.
+    SQUARE_SIZE: int = BOARD_SIZE // 8  # 72px per pătrățel
     
     # --- Margini ---
-    TOP_MARGIN: int = 50 # O margine superioară fixă
-    LEFT_MARGIN: int = BUTTONS_WIDTH + 60
+    TOP_MARGIN: int = 40
+    LEFT_MARGIN: int = BUTTONS_WIDTH + 40 # Spațiu redus proporțional -> 240
     
     # --- Culori (rămân la fel) ---
     LIGHT_SQUARE: Tuple[int, int, int] = (240, 217, 181)
@@ -184,6 +185,7 @@ class GameState:
     active_trap_line: Optional[List[str]] = None
 
 # Repository Layer
+
 class TrapRepository:
     """Repository for managing chess traps in SQLite database."""
     
@@ -212,33 +214,32 @@ class TrapRepository:
                 "INSERT INTO traps (name, moves, color) VALUES (?, ?, ?)",
                 (trap.name, json.dumps(trap.moves), int(trap.color))
             )
+            conn.commit()
             return cursor.lastrowid
     
     def get_all_traps(self) -> List[ChessTrap]:
         """Get all traps from database."""
         traps = []
-        
-        with sqlite3.connect(self.db_path) as conn:
-            cursor = conn.execute("SELECT id, name, moves, color FROM traps")
-            
-            for row in cursor.fetchall():
-                trap_id, name, moves_json, color = row
-                moves = json.loads(moves_json)
-                traps.append(ChessTrap(
-                    id=trap_id,
-                    name=name,
-                    moves=moves,
-                    color=bool(color)
-                ))
-        
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.execute("SELECT id, name, moves, color FROM traps")
+                for row in cursor.fetchall():
+                    trap_id, name, moves_json, color = row
+                    moves = json.loads(moves_json)
+                    traps.append(ChessTrap(id=trap_id, name=name, moves=moves, color=bool(color)))
+        except sqlite3.Error as e:
+            print(f"[DB ERROR] Could not read traps: {e}")
         return traps
     
     def get_total_trap_count(self) -> int:
         """Get total number of traps in database."""
-        with sqlite3.connect(self.db_path) as conn:
-            cursor = conn.execute("SELECT COUNT(*) FROM traps")
-            return cursor.fetchone()[0]
-    
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.execute("SELECT COUNT(*) FROM traps")
+                return cursor.fetchone()[0]
+        except sqlite3.Error:
+            return 0
+            
     def import_traps(self, traps: List[ChessTrap]) -> int:
         """Import multiple traps, avoiding duplicates."""
         imported_count = 0
@@ -260,74 +261,243 @@ class TrapRepository:
         
         return imported_count
 
+    # --- METODE NOI PENTRU AUDIT ---
+    
+    def delete_traps_by_ids(self, ids: List[int]):
+        """Deletes multiple traps from the database in a single transaction."""
+        if not ids:
+            return
+        with sqlite3.connect(self.db_path) as conn:
+            # Create a placeholder string like (?, ?, ?) for the number of IDs
+            placeholders = ', '.join('?' for _ in ids)
+            query = f"DELETE FROM traps WHERE id IN ({placeholders})"
+            conn.execute(query, ids)
+            conn.commit()
+            
+    def update_trap_colors(self, updates: List[Tuple[bool, int]]):
+        """Batch updates the color of multiple traps."""
+        if not updates:
+            return
+        # `updates` is a list of (new_color, trap_id)
+        with sqlite3.connect(self.db_path) as conn:
+            conn.executemany("UPDATE traps SET color = ? WHERE id = ?", updates)
+            conn.commit()
+
 # Service Layer
 class TrapService:
-    """Service for managing trap logic and suggestions."""
+    """
+    Service for managing trap logic and suggestions using position-based indexing
+    with on-disk caching for fast startup.
+    """
+    
+    # Definim calea către fișierul de cache
+    CACHE_FILE_PATH = "trap_index.cache"
     
     def __init__(self, repository: TrapRepository):
         self.repository = repository
-        # Încărcăm toate capcanele o singură dată la inițializare pentru performanță
+        print("[TRAP SERVICE] Initializing...")
+        start_time = time.time()
+        
+        # 1. Încărcăm toate capcanele
         self.all_traps = self.repository.get_all_traps()
-    
-    def _get_matching_traps(self, game_state: GameState) -> List[ChessTrap]:
-        if game_state.is_recording: return []
-        target_color = game_state.current_player
-        matching_traps = []
-        history_len = len(game_state.move_history)
+        self.id_to_trap_map = {trap.id: trap for trap in self.all_traps}
+        
+        # 2. Încercăm să încărcăm indexul din cache
+        if not self._load_index_from_cache():
+            # Dacă încărcarea eșuează sau cache-ul este invalid, construim indexul
+            print("[TRAP SERVICE] Cache not found or invalid. Building new position index...")
+            self.position_index = self._create_position_index()
+            # Și îl salvăm pentru data viitoare
+            self._save_index_to_cache()
+        
+        end_time = time.time()
+        print(f"[TRAP SERVICE] Initialization complete in {end_time - start_time:.4f} seconds.")
+        if self.all_traps:
+            # --- AICI ESTE MODIFICAREA ---
+            trap_count_formatted = f"{len(self.all_traps):_}".replace("_", " ")
+            position_count_formatted = f"{len(self.position_index):_}".replace("_", " ")
+            print(f"               Using index for {trap_count_formatted} traps across {position_count_formatted} unique positions.")
+
+    def _load_index_from_cache(self) -> bool:
+        """
+        Tries to load the position index from a cache file.
+        Returns True if successful and the cache is valid, False otherwise.
+        """
+        if not os.path.exists(self.CACHE_FILE_PATH):
+            print("[TRAP SERVICE] Cache file not found.")
+            return False
+            
+        try:
+            with open(self.CACHE_FILE_PATH, 'rb') as f:
+                print(f"[TRAP SERVICE] Reading cache file: {self.CACHE_FILE_PATH}")
+                cache_data = pickle.load(f)
+            
+            cached_trap_count = cache_data['trap_count']
+            cached_id_sum = cache_data['id_sum']
+            
+            # Validarea cache-ului
+            current_trap_count = len(self.all_traps)
+            current_id_sum = sum(trap.id for trap in self.all_traps if trap.id is not None)
+            
+            if current_trap_count == cached_trap_count and current_id_sum == cached_id_sum:
+                # Cache-ul este valid! Îl folosim.
+                self.position_index = cache_data['index']
+                print("[TRAP SERVICE] Cache is valid and loaded successfully.")
+                return True
+            else:
+                # Cache-ul este invalid (datele din DB s-au schimbat)
+                print("[TRAP SERVICE] Cache is stale. DB has changed.")
+                return False
+                
+        except (pickle.UnpicklingError, KeyError, EOFError) as e:
+            # Fișierul de cache este corupt sau are un format vechi
+            print(f"[TRAP SERVICE] Cache file is corrupt or invalid: {e}. It will be rebuilt.")
+            return False
+
+    def _save_index_to_cache(self) -> None:
+        """
+        Saves the current position index and validation data to the cache file.
+        """
+        if not hasattr(self, 'position_index') or not self.position_index:
+            print("[TRAP SERVICE] Index is empty, not saving cache.")
+            return
+            
+        print(f"[TRAP SERVICE] Saving new index to cache file: {self.CACHE_FILE_PATH}")
+        
+        cache_data = {
+            'trap_count': len(self.all_traps),
+            'id_sum': sum(trap.id for trap in self.all_traps if trap.id is not None),
+            'index': self.position_index
+        }
+        
+        try:
+            with open(self.CACHE_FILE_PATH, 'wb') as f:
+                pickle.dump(cache_data, f, protocol=pickle.HIGHEST_PROTOCOL)
+            print("[TRAP SERVICE] Cache saved successfully.")
+        except IOError as e:
+            print(f"[TRAP SERVICE] [ERROR] Could not write cache file: {e}")
+
+    def _create_position_index(self) -> Dict[str, List[Tuple[int, int]]]:
+        """
+        Pre-processes all traps to create a map from a position's FEN
+        to the traps and move indices that result in that position.
+        """
+        index_start_time = time.time()
+        index = defaultdict(list)
+        
         for trap in self.all_traps:
-            if (trap.color == target_color and
-                len(trap.moves) > history_len and
-                trap.moves[:history_len] == game_state.move_history):
-                matching_traps.append(trap)
-        return matching_traps
+            if trap.id is None: continue # Skip traps without an ID (should not happen with DB)
+            
+            board = chess.Board()
+            try:
+                for i, move_san in enumerate(trap.moves):
+                    move = board.parse_san(move_san)
+                    board.push(move)
+                    positional_fen = board.shredder_fen()
+                    index[positional_fen].append((trap.id, i))
+            except ValueError:
+                # Optional: log invalid traps
+                # print(f"[INDEX WARNING] Skipping trap ID {trap.id} due to invalid move.")
+                continue
+                
+        index_end_time = time.time()
+        print(f"[TRAP SERVICE] Indexing took {index_end_time - index_start_time:.2f} seconds.")
+        return index
+
+    def _get_matches_for_current_position(self, game_state: GameState) -> List[Tuple[ChessTrap, int]]:
+        """
+        Helper method to find all trap matches for the current board state using the index.
+        Returns a list of (trap_object, move_index_in_trap).
+        """
+        if game_state.is_recording or not hasattr(self, 'position_index'):
+            return []
+            
+        current_fen = game_state.board.shredder_fen()
+        matching_entries = self.position_index.get(current_fen, [])
+        
+        results = []
+        for trap_id, move_index in matching_entries:
+            trap = self.id_to_trap_map.get(trap_id)
+            if trap and trap.color == game_state.current_player:
+                results.append((trap, move_index))
+        return results
 
     def count_matching_traps(self, game_state: GameState) -> int:
-        """Numără toate capcanele care se potrivesc cu poziția curentă."""
-        # La începutul jocului (fără mutări), numără toate capcanele pentru jucătorul curent
-        if not game_state.move_history:
-            return sum(1 for trap in self.all_traps if trap.color == game_state.current_player)
-        return len(self._get_matching_traps(game_state))
+        """Numără capcanele care se potrivesc cu poziția curentă, folosind indexul."""
+        if not self.all_traps:
+            return 0
+            
+        # La începutul jocului, FEN-ul este unic, deci putem folosi logica nouă
+        if game_state.board.fullmove_number == 1 and game_state.board.turn == chess.WHITE:
+             return sum(1 for trap in self.all_traps if trap.color == game_state.current_player)
+
+        return len(self._get_matches_for_current_position(game_state))
 
     def get_aggregated_suggestions(self, game_state: GameState) -> List[MoveSuggestion]:
-        if game_state.board.turn != game_state.current_player: return []
-        
-        matching_traps = self._get_matching_traps(game_state)
-        history_len = len(game_state.move_history)
+        """Obține sugestii agregate folosind noul index de poziții."""
+        # Verifică dacă este rândul jucătorului uman să mute
+        if game_state.board.turn != game_state.current_player:
+            return []
+
+        # Logică specială pentru poziția de start (fără mutări în istoric)
+        if not game_state.move_history:
+            move_groups = defaultdict(list)
+            player_color_at_turn = game_state.board.turn
+            
+            for trap in self.all_traps:
+                # Verificăm dacă trap-ul este pentru culoarea care e la mutare
+                if trap.color == player_color_at_turn and trap.moves:
+                    first_move = trap.moves[0]
+                    move_groups[first_move].append(trap.moves)
+            
+            suggestions = []
+            for move_san, continuations in move_groups.items():
+                suggestions.append(MoveSuggestion(
+                    suggested_move=move_san,
+                    trap_count=len(continuations),
+                    example_trap_line=continuations[0]
+                ))
+            
+            suggestions.sort(key=lambda s: s.trap_count, reverse=True)
+            return suggestions
+            
+        # Logica existentă pentru pozițiile de după prima mutare (folosind indexul)
+        matches = self._get_matches_for_current_position(game_state)
         move_groups = defaultdict(list)
         
-        # Următoarea mutare trebuie să fie a jucătorului
-        if (history_len % 2 == 0 and game_state.current_player == chess.WHITE) or \
-           (history_len % 2 != 0 and game_state.current_player == chess.BLACK):
-            for trap in matching_traps:
-                next_move = trap.moves[history_len]
-                move_groups[next_move].append(trap)
-                
+        for trap, move_index in matches:
+            if len(trap.moves) > move_index + 1:
+                next_move = trap.moves[move_index + 1]
+                move_groups[next_move].append(trap.moves[move_index + 1:])
+        
         suggestions = []
-        for move_san, traps in move_groups.items():
+        for move_san, continuations in move_groups.items():
             suggestions.append(MoveSuggestion(
                 suggested_move=move_san,
-                trap_count=len(traps),
-                example_trap_line=traps[0].moves[history_len:]
+                trap_count=len(continuations),
+                example_trap_line=continuations[0]
             ))
+            
         suggestions.sort(key=lambda s: s.trap_count, reverse=True)
         return suggestions
 
     def get_most_common_response(self, game_state: GameState) -> Optional[str]:
-        if game_state.board.turn == game_state.current_player: return None
+        """Găsește cel mai comun răspuns al adversarului folosind indexul."""
+        if game_state.board.turn == game_state.current_player:
+            return None
 
-        matching_traps = self._get_matching_traps(game_state)
-        history_len = len(game_state.move_history)
+        matches = self._get_matches_for_current_position(game_state)
         response_counts = defaultdict(int)
         
-        # Următoarea mutare trebuie să fie a adversarului
-        if (history_len % 2 != 0 and game_state.current_player == chess.WHITE) or \
-           (history_len % 2 == 0 and game_state.current_player == chess.BLACK):
-            for trap in matching_traps:
-                if len(trap.moves) > history_len:
-                    opponent_response_san = trap.moves[history_len]
-                    response_counts[opponent_response_san] += 1
+        for trap, move_index in matches:
+            # Răspunsul adversarului este următoarea mutare din linie
+            if len(trap.moves) > move_index + 1:
+                opponent_response_san = trap.moves[move_index + 1]
+                response_counts[opponent_response_san] += 1
         
-        if not response_counts: return None
+        if not response_counts:
+            return None
+            
         return max(response_counts, key=response_counts.get)
 
 class PGNImportService:
@@ -510,6 +680,190 @@ class PGNImportService:
                 continue
         
         return white_traps, black_traps
+
+@dataclass
+class OpeningInfo:
+    """Informații despre o deschidere."""
+    name: str
+    eco_code: str
+    category: str  # "Open", "Semi-Open", "Closed", "Indian", "Flank", etc.
+  
+class DatabaseAuditor:
+    """
+    Handles the verification and cleaning of the traps database.
+    """
+    def __init__(self, repository: TrapRepository):
+        self.repository = repository
+
+    def run_audit(self, max_moves: int) -> Tuple[str, bool]:
+        """
+        Runs all audit checks and returns a summary report and a boolean
+        indicating if any changes were made to the database.
+        """
+        print("[AUDIT] Starting database audit...")
+        start_time = time.time()
+        
+        # Flag pentru a urmări dacă facem vreo modificare
+        changes_made = False
+        
+        all_traps = self.repository.get_all_traps()
+        if not all_traps:
+            return "Audit Complete: The database is empty.", False
+
+        # ... (logica de a găsi duplicate, color_updates, etc. rămâne identică) ...
+        seen_signatures = set()
+        duplicate_ids = []
+        for trap in all_traps:
+            signature = (json.dumps(trap.moves), trap.color)
+            if signature in seen_signatures:
+                duplicate_ids.append(trap.id)
+            else:
+                seen_signatures.add(signature)
+        
+        color_updates = []
+        no_checkmate_ids = []
+        too_long_ids = []
+        
+        for trap in all_traps:
+            if trap.id in duplicate_ids:
+                continue
+            if not trap.moves or not trap.moves[-1].endswith('#'):
+                no_checkmate_ids.append(trap.id)
+                continue
+            num_moves = len(trap.moves)
+            expected_color = chess.WHITE if num_moves % 2 != 0 else chess.BLACK
+            if trap.color != expected_color:
+                color_updates.append((expected_color, trap.id))
+            if num_moves > max_moves:
+                too_long_ids.append(trap.id)
+
+        # --- Perform Database Operations ---
+        all_ids_to_delete = set(duplicate_ids) | set(no_checkmate_ids) | set(too_long_ids)
+        
+        if all_ids_to_delete:
+            print(f"[AUDIT] Deleting {len(all_ids_to_delete)} invalid or duplicate traps.")
+            self.repository.delete_traps_by_ids(list(all_ids_to_delete))
+            changes_made = True  # AM FĂCUT MODIFICĂRI!
+
+        if color_updates:
+            print(f"[AUDIT] Correcting color for {len(color_updates)} traps.")
+            self.repository.update_trap_colors(color_updates)
+            changes_made = True  # AM FĂCUT MODIFICĂRI!
+            
+        elapsed = time.time() - start_time
+        print(f"[AUDIT] Audit finished in {elapsed:.2f} seconds. Changes made: {changes_made}")
+
+        # --- Generate Report ---
+        report = (
+            f"Audit Complete!\n\n"
+            f"  - Duplicates removed: {len(duplicate_ids)}\n"
+            f"  - Color mismatches fixed: {len(color_updates)}\n"
+            f"  - Traps without '#' removed: {len(no_checkmate_ids)}\n"
+            f"  - Traps longer than {max_moves} moves removed: {len(too_long_ids)}\n\n"
+            f"Total entries removed: {len(all_ids_to_delete)}\n"
+            f"Database was modified: {'Yes' if changes_made else 'No'}"
+        )
+        return report, changes_made
+
+class OpeningDatabase:
+    """Bază de date eficientă pentru deschideri, cu un dicționar îmbogățit."""
+    
+    def __init__(self):
+        # Folosim un dicționar unde cheia este tuple de mutări
+        self.openings: Dict[Tuple[str, ...], OpeningInfo] = {}
+        self._load_openings()
+        print(f"[DEBUG INIT] Opening database loaded with {len(self.openings)} entries.")
+        
+    def _load_openings(self):
+        """Încarcă toate deschiderile. Organizat pe categorii pentru claritate."""
+        
+        # --- DESCHIDERI DESCHISE (1.e4 e5) ---
+        self.openings[("e4", "e5")] = OpeningInfo("King's Pawn Game", "C20", "Open")
+        self.openings[("e4", "e5", "Nf3")] = OpeningInfo("King's Knight Opening", "C40", "Open")
+        self.openings[("e4", "e5", "Nf3", "Nc6")] = OpeningInfo("Italian/Spanish Base", "C44", "Open")
+        self.openings[("e4", "e5", "Nf3", "Nc6", "Bb5")] = OpeningInfo("Spanish (Ruy Lopez)", "C60", "Open")
+        self.openings[("e4", "e5", "Nf3", "Nc6", "Bb5", "a6")] = OpeningInfo("Spanish: Morphy Defense", "C70", "Open")
+        self.openings[("e4", "e5", "Nf3", "Nc6", "Bb5", "a6", "Ba4", "Nf6")] = OpeningInfo("Spanish: Closed", "C78", "Open")
+        self.openings[("e4", "e5", "Nf3", "Nc6", "Bc4")] = OpeningInfo("Italian Game", "C50", "Open")
+        self.openings[("e4", "e5", "Nf3", "Nc6", "Bc4", "Bc5")] = OpeningInfo("Italian: Giuoco Piano", "C53", "Open")
+        self.openings[("e4", "e5", "Nf3", "Nc6", "Bc4", "Nf6")] = OpeningInfo("Italian: Two Knights", "C55", "Open")
+        self.openings[("e4", "e5", "Nf3", "Nc6", "Bc4", "Nf6", "Ng5", "d5", "exd5", "Na5")] = OpeningInfo("Two Knights: Polerio", "C58", "Open")
+        self.openings[("e4", "e5", "Nf3", "Nc6", "Bc4", "Nf6", "Ng5", "d5", "exd5", "Nxd5", "Nxf7")] = OpeningInfo("Fried Liver Attack!", "C57", "Open")
+        self.openings[("e4", "e5", "Nf3", "Nc6", "d4")] = OpeningInfo("Scotch Game", "C44", "Open")
+        self.openings[("e4", "e5", "Nf3", "Nc6", "d4", "exd4", "c3")] = OpeningInfo("Scotch Gambit", "C44", "Open")
+        self.openings[("e4", "e5", "Nf3", "Nf6")] = OpeningInfo("Petrov's Defense", "C42", "Open")
+        self.openings[("e4", "e5", "Nc3")] = OpeningInfo("Vienna Game", "C25", "Open")
+        self.openings[("e4", "e5", "f4")] = OpeningInfo("King's Gambit", "C30", "Open")
+        self.openings[("e4", "e5", "f4", "exf4")] = OpeningInfo("King's Gambit Accepted", "C33", "Open")
+        self.openings[("e4", "e5", "f4", "d5")] = OpeningInfo("King's Gambit Declined", "C30", "Open")
+
+        # --- DESCHIDERI SEMI-DESCHISE (1.e4 altceva) ---
+        self.openings[("e4", "c5")] = OpeningInfo("Sicilian Defense", "B20", "Semi-Open")
+        self.openings[("e4", "c5", "Nf3", "d6", "d4", "cxd4", "Nxd4", "Nf6", "Nc3", "a6")] = OpeningInfo("Sicilian: Najdorf", "B90", "Semi-Open")
+        self.openings[("e4", "c5", "Nf3", "d6", "d4", "cxd4", "Nxd4", "Nf6", "Nc3", "g6")] = OpeningInfo("Sicilian: Dragon", "B70", "Semi-Open")
+        self.openings[("e4", "c5", "Nf3", "Nc6", "d4", "cxd4", "Nxd4", "Nf6", "Nc3", "e5")] = OpeningInfo("Sicilian: Sveshnikov", "B33", "Semi-Open")
+        self.openings[("e4", "c5", "Nf3", "Nc6", "Bb5")] = OpeningInfo("Sicilian: Rossolimo", "B31", "Semi-Open")
+        self.openings[("e4", "c5", "Nc3")] = OpeningInfo("Sicilian: Closed", "B23", "Semi-Open")
+        self.openings[("e4", "c5", "c3")] = OpeningInfo("Sicilian: Alapin", "B22", "Semi-Open")
+        self.openings[("e4", "e6")] = OpeningInfo("French Defense", "C00", "Semi-Open")
+        self.openings[("e4", "e6", "d4", "d5")] = OpeningInfo("French Defense", "C00", "Semi-Open")
+        self.openings[("e4", "e6", "d4", "d5", "e5")] = OpeningInfo("French: Advance", "C02", "Semi-Open")
+        self.openings[("e4", "e6", "d4", "d5", "Nc3", "Bb4")] = OpeningInfo("French: Winawer", "C15", "Semi-Open")
+        self.openings[("e4", "e6", "d4", "d5", "Nd2")] = OpeningInfo("French: Tarrasch", "C03", "Semi-Open")
+        self.openings[("e4", "e6", "d4", "d5", "exd5")] = OpeningInfo("French: Exchange", "C01", "Semi-Open")
+        self.openings[("e4", "c6")] = OpeningInfo("Caro-Kann Defense", "B10", "Semi-Open")
+        self.openings[("e4", "c6", "d4", "d5", "e5")] = OpeningInfo("Caro-Kann: Advance", "B12", "Semi-Open")
+        self.openings[("e4", "c6", "d4", "d5", "Nc3", "dxe4", "Nxe4", "Bf5")] = OpeningInfo("Caro-Kann: Classical", "B18", "Semi-Open")
+        
+        # --- DESCHIDERI ÎNCHISE & INDIENE (1.d4) ---
+        self.openings[("d4", "d5")] = OpeningInfo("Queen's Pawn Game", "D00", "Closed")
+        self.openings[("d4", "d5", "c4")] = OpeningInfo("Queen's Gambit", "D06", "Closed")
+        self.openings[("d4", "d5", "c4", "e6")] = OpeningInfo("Queen's Gambit Declined", "D30", "Closed")
+        self.openings[("d4", "d5", "c4", "e6", "Nc3", "Nf6", "cxd5", "exd5", "Bg5")] = OpeningInfo("QGD: Exchange, Main Line", "D35", "Closed")
+        self.openings[("d4", "d5", "c4", "e6", "Nc3", "c5")] = OpeningInfo("QGD: Tarrasch Defense", "D32", "Closed")
+        self.openings[("d4", "d5", "c4", "dxc4")] = OpeningInfo("Queen's Gambit Accepted", "D20", "Closed")
+        self.openings[("d4", "d5", "c4", "c6")] = OpeningInfo("Slav Defense", "D10", "Closed")
+        self.openings[("d4", "d5", "Nf3", "Nf6", "Bf4")] = OpeningInfo("London System", "D02", "Closed")
+        self.openings[("d4", "f5")] = OpeningInfo("Dutch Defense", "A80", "Indian")
+        
+        self.openings[("d4", "Nf6")] = OpeningInfo("Indian Defense", "A45", "Indian")
+        self.openings[("d4", "Nf6", "c4", "e6", "Nc3", "Bb4")] = OpeningInfo("Nimzo-Indian Defense", "E20", "Indian")
+        self.openings[("d4", "Nf6", "c4", "e6", "Nf3", "b6")] = OpeningInfo("Queen's Indian Defense", "E12", "Indian")
+        self.openings[("d4", "Nf6", "c4", "g6", "Nc3", "d5")] = OpeningInfo("Grünfeld Defense", "D80", "Indian")
+        self.openings[("d4", "Nf6", "c4", "g6", "Nc3", "Bg7", "e4", "d6")] = OpeningInfo("King's Indian Defense", "E90", "Indian")
+        
+        # --- DESCHIDERI FLANK ---
+        self.openings[("c4",)] = OpeningInfo("English Opening", "A10", "Flank")
+        self.openings[("c4", "e5")] = OpeningInfo("English: King's English", "A20", "Flank")
+        self.openings[("c4", "c5")] = OpeningInfo("English: Symmetrical", "A30", "Flank")
+        self.openings[("Nf3",)] = OpeningInfo("Réti Opening", "A04", "Flank")
+        self.openings[("Nf3", "d5", "g3")] = OpeningInfo("Réti: King's Indian Attack", "A07", "Flank")
+
+    def get_opening_name(self, moves: List[str]) -> Optional[OpeningInfo]:
+        """Găsește cea mai specifică deschidere pentru o listă de mutări."""
+        for length in range(len(moves), 0, -1):
+            move_tuple = tuple(moves[:length])
+            if move_tuple in self.openings:
+                return self.openings[move_tuple]
+        return None
+        
+    def get_opening_phase_info(self, moves: List[str]) -> Tuple[str, str]:
+        """Returnează informații despre faza jocului pentru fiecare parte."""
+        opening_info = self.get_opening_name(moves)
+        
+        if not opening_info:
+            if not moves:
+                return "Starting Position", "Starting Position"
+            else:
+                # Folosește ultima deschidere cunoscută dacă nu mai avem potrivire
+                # Caută din nou, dar nu returna 'None'
+                last_known = self.get_opening_name(moves[:-1])
+                if last_known:
+                    return f"{last_known.name}...", f"{last_known.name}..."
+                return "Book moves end", "Book moves end"
+
+        base_text = f"{opening_info.name} ({opening_info.eco_code})"
+        return base_text, base_text
 
 class SettingsService:
     """Service for managing application settings."""
@@ -914,8 +1268,9 @@ class Renderer:
         surface.blit(title_surface, (panel_rect.x + 10, y_offset))
         y_offset += 40
         
-        # NOU: Afișează numărul de capcane care se potrivesc
-        count_text = f"Matching traps: {total_matching_traps}"
+        # --- AICI ESTE MODIFICAREA ---
+        traps_formatted = f"{total_matching_traps:_}".replace("_", " ")
+        count_text = f"Matching traps: {traps_formatted}"
         count_surface = self.small_font.render(count_text, True, (255, 255, 0))
         surface.blit(count_surface, (panel_rect.x + 10, y_offset))
         y_offset += 30
@@ -937,8 +1292,9 @@ class Renderer:
                 pygame.draw.rect(surface, (60, 60, 60), suggestion_rect_abs)
                 pygame.draw.rect(surface, self.config.BORDER_COLOR, suggestion_rect_abs, 1)
                 
-                # NOU: Afișează sugestia în format "1. Nf3 (150 traps)"
-                suggestion_text = f"{i+1}. {suggestion.suggested_move} ({suggestion.trap_count} traps)"
+                # Formatăm și numărul de capcane pentru fiecare sugestie
+                trap_count_formatted = f"{suggestion.trap_count:_}".replace("_", " ")
+                suggestion_text = f"{i+1}. {suggestion.suggested_move} ({trap_count_formatted} traps)"
                 text_surface = self.small_font.render(suggestion_text, True, self.config.TEXT_COLOR)
                 surface.blit(text_surface, (suggestion_rect_abs.x + 10, suggestion_rect_abs.y + 10))
                 
@@ -950,33 +1306,63 @@ class Renderer:
             
         return button_rects
     
-    def render_status(self, surface: pygame.Surface, state: GameState) -> None:
-        """Render game status information above the board."""
-        # Mutăm statusul deasupra tablei
-        status_y = self.config.TOP_MARGIN - 40
+    def render_status(self, surface: pygame.Surface, state: GameState, white_info: str, black_info: str) -> None:
+        """Render game status information including opening name from both perspectives."""
         
-        turn_text = "Your turn to move" if state.board.turn == state.current_player else "Opponent's turn"
-        turn_surface = self.font.render(turn_text, True, self.config.TEXT_COLOR)
+        # Stabilește culoarea textului pentru fiecare parte
+        white_text_color = (255, 255, 255)
+        black_text_color = (220, 220, 220)
         
-        status_rect = pygame.Rect(self.config.LEFT_MARGIN, status_y, self.config.BOARD_SIZE, 35)
+        # Perspectiva JOS (de obicei albul)
+        bottom_y = self.config.TOP_MARGIN + self.config.BOARD_SIZE + 45
+        bottom_perspective_text = f"♔ {white_info}"
+        bottom_surface = self.font.render(bottom_perspective_text, True, white_text_color)
+        bottom_rect = bottom_surface.get_rect(center=(self.config.LEFT_MARGIN + self.config.BOARD_SIZE // 2, bottom_y))
         
-        text_rect = turn_surface.get_rect(center=status_rect.center)
-        surface.blit(turn_surface, text_rect)
+        # Fundal pentru contrast jos
+        bg_rect_bottom = bottom_rect.inflate(20, 10)
         
+        # Perspectiva SUS (de obicei negrul)
+        top_y = self.config.TOP_MARGIN - 30
+        top_perspective_text = f"♛ {black_info}"
+        top_surface = self.font.render(top_perspective_text, True, black_text_color)
+        top_rect = top_surface.get_rect(center=(self.config.LEFT_MARGIN + self.config.BOARD_SIZE // 2, top_y))
+        
+        # Fundal pentru contrast sus
+        bg_rect_top = top_rect.inflate(20, 10)
+        
+        # Desenează fundalurile
+        pygame.draw.rect(surface, (40, 40, 40), bg_rect_bottom, border_radius=5)
+        pygame.draw.rect(surface, (40, 40, 40), bg_rect_top, border_radius=5)
+        
+        # Desenează textul
+        surface.blit(bottom_surface, bottom_rect)
+        surface.blit(top_surface, top_rect)
+
+        # Evidențiază chenarul jucătorului al cărui rând este
+        highlight_color = (255, 255, 0)
+        if state.board.turn == chess.WHITE:
+            pygame.draw.rect(surface, highlight_color, bg_rect_bottom, 2, border_radius=5)
+        else:
+            pygame.draw.rect(surface, highlight_color, bg_rect_top, 2, border_radius=5)
+        
+        # Textul RECORDING (dacă este cazul)
         if state.is_recording:
             record_text = "RECORDING - Type trap name and press Enter"
             record_surface = self.small_font.render(record_text, True, (255, 100, 100))
-            surface.blit(record_surface, (self.config.LEFT_MARGIN, status_y - 25))
+            record_rect = record_surface.get_rect(centerx=self.config.LEFT_MARGIN + self.config.BOARD_SIZE // 2, y=5)
+            surface.blit(record_surface, record_rect)
 
     def render_history_panel(self, surface: pygame.Surface, move_history: List[str]) -> pygame.Rect:
         """Renders the move history panel below the board with a copy button."""
-        # Calculează poziția panoului sub tablă
-        panel_y = self.config.TOP_MARGIN + self.config.BOARD_SIZE + 15
-        panel_height = self.config.HEIGHT - panel_y - 20
-        # Asigură-te că panoul are o înălțime minimă
-        if panel_height < 60:
-            panel_height = 60
-            panel_y = self.config.HEIGHT - 20 - panel_height
+        # Calculează poziția panoului mai jos, pentru a face loc numelui deschiderii
+        panel_y = self.config.TOP_MARGIN + self.config.BOARD_SIZE + 80 # MODIFICAT de la +15
+        panel_height = self.config.HEIGHT - panel_y - 20 # MODIFICAT pentru a fi dinamic
+        
+        # Asigură-te că panoul are o înălțime minimă și nu depășește ecranul
+        if panel_height < 80: panel_height = 80
+        if panel_y + panel_height > self.config.HEIGHT - 10:
+            panel_height = self.config.HEIGHT - 10 - panel_y
             
         panel_rect = pygame.Rect(self.config.LEFT_MARGIN, panel_y, self.config.BOARD_SIZE, panel_height)
         
@@ -1037,12 +1423,11 @@ class Renderer:
         
         return copy_button_rect
 
-
 if QT_AVAILABLE:
     class QtImportWindow(QDialog):
         """A non-blocking Qt Dialog for PGN import settings."""
         
-        def __init__(self, settings_service, on_start_import, on_clear_db, parent=None):
+        def __init__(self, settings_service, on_start_import, on_clear_db, on_start_audit, parent=None):
             super().__init__(parent)
             
             self.setWindowTitle("Import & Database Management")
@@ -1051,6 +1436,7 @@ if QT_AVAILABLE:
             self.settings_service = settings_service
             self.on_start_import = on_start_import
             self.on_clear_db = on_clear_db
+            self.on_start_audit = on_start_audit # <--- LINIA NOUĂ DE AICI
             
             # Variabile interne
             self.full_filepath = ""
@@ -1063,6 +1449,25 @@ if QT_AVAILABLE:
             self._create_filters_group()
             self._create_database_group()
             self._create_actions_group()
+
+
+        def start_audit(self):
+            """Starts the audit process by calling the controller's callback."""
+            try:
+                max_moves = int(self.max_moves_edit.text())
+                if max_moves < 4: raise ValueError
+            except ValueError:
+                QMessageBox.warning(self, "Warning", "Please enter a valid number for max. semi-moves (>= 4) to use as a reference for the audit.")
+                return
+
+            # Salvăm setarea pentru consistență
+            self.settings_service.update_setting("pgn_import_max_moves", max_moves)
+            
+            # Apelăm funcția de start din GameController
+            self.on_start_audit(max_moves)
+            
+            self.accept() # Închide dialogul după ce a pornit auditul
+
 
         def _create_source_group(self):
             group_box = QGroupBox("Import Source")
@@ -1105,11 +1510,19 @@ if QT_AVAILABLE:
             layout = QHBoxLayout()
             
             clear_button = QPushButton("Clear All Traps")
-            clear_button.setStyleSheet("background-color: #FF8A80;")
+            clear_button.setStyleSheet("background-color: #FF8A80;") # Roșu deschis
             clear_button.clicked.connect(self.on_clear_db)
             
+            # --- Butonul NOU pentru AUDIT ---
+            audit_button = QPushButton("Audit DB")
+            audit_button.setStyleSheet("background-color: #C1A7E2; font-weight: bold;") # Mov
+            audit_button.clicked.connect(self.start_audit) # Conectăm la o funcție nouă
+            
+            # Ordinea butoanelor în interfață
+            layout.addWidget(audit_button)
             layout.addWidget(clear_button)
             layout.addStretch()
+            
             group_box.setLayout(layout)
             self.main_layout.addWidget(group_box)
             
@@ -1194,6 +1607,7 @@ class GameController:
         self.trap_service = TrapService(self.trap_repository)
         self.pgn_service = PGNImportService(self.trap_repository)
         self.settings_service = SettingsService()
+        self.opening_db = OpeningDatabase()  # <--- LINIA ADĂUGATĂ AICI
         
         self.screen = pygame.display.set_mode((self.config.WIDTH, self.config.HEIGHT))
         pygame.display.set_caption("Chess Trap Trainer - Clean Architecture")
@@ -1213,9 +1627,10 @@ class GameController:
         self.move_history_forward = []
         self.current_suggestions = []
         self.highlighted_moves = []
-        self.copy_button_rect = None # ADAUGĂ ACEASTĂ LINIE
+        self.copy_button_rect = None
+        
+        print("[DEBUG INIT] GameController initialization complete!")
     
-    print("[DEBUG INIT] GameController initialization complete!")
     
     def run(self) -> None:
         """Main game loop that also manages the Qt event loop."""
@@ -1282,9 +1697,15 @@ class GameController:
                 self.renderer.render_suggestions_panel(
                     self.screen, self.current_suggestions, total_matching
                 )
-                self.renderer.render_status(self.screen, self.current_state)
                 
-                # APEL NOU: Randăm panoul de istoric
+                # --- BLOCUL MODIFICAT ESTE AICI ---
+                # Obținem informațiile despre deschidere de la noul nostru serviciu
+                white_info, black_info = self.opening_db.get_opening_phase_info(self.current_state.move_history)
+                # Pasăm aceste informații către metoda de randare a statusului
+                self.renderer.render_status(self.screen, self.current_state, white_info, black_info)
+                # --- SFÂRȘITUL BLOCULUI MODIFICAT ---
+                
+                # Randăm panoul de istoric
                 self.copy_button_rect = self.renderer.render_history_panel(
                     self.screen, 
                     self.current_state.move_history
@@ -1316,11 +1737,11 @@ class GameController:
         
         return True  # Continue running
     
+
     def _start_game(self, color: chess.Color) -> None:
         """Start a new game with the specified color."""
         print(f"[DEBUG START] Starting game with color: {chess.COLOR_NAMES[color]}")
         
-        # Create new game state with all required attributes
         self.current_state = GameState(
             board=chess.Board(),
             current_player=color,
@@ -1338,7 +1759,11 @@ class GameController:
         print(f"[DEBUG START] Game started - Flipped: {self.flipped}")
         print(f"[DEBUG START] Initial board: {self.current_state.board.fen()}")
         
-        self._update_suggestions()
+        # --- AICI ESTE CORECȚIA ESENȚIALĂ ---
+        # Actualizăm sugestiile imediat și le stocăm în self.current_suggestions
+        # pentru a fi disponibile la prima randare a ecranului de joc.
+        self.current_suggestions = self.trap_service.get_aggregated_suggestions(self.current_state)
+        print(f"[DEBUG START] Initial suggestions loaded. Found {len(self.current_suggestions)} move options.")
 
     def _clear_database(self):
         """Handles clearing the database using a non-blocking QMessageBox from PySide6."""
@@ -1731,7 +2156,6 @@ class GameController:
             # Refresh suggestions
             self._update_suggestions()
     
-
     def _import_pgn_file(self) -> None:
         """Opens the Qt Import Settings window."""
         if not QT_AVAILABLE:
@@ -1741,7 +2165,6 @@ class GameController:
         # Funcția care va fi apelată de butonul "START IMPORT"
         def start_import_logic(filepath, max_moves, checkmate_only):
             print(f"[IMPORT] Starting import with settings...")
-            
             pygame.mouse.set_cursor(pygame.SYSTEM_CURSOR_WAIT)
             
             white_count, black_count = self.pgn_service.import_from_file(filepath, max_moves, checkmate_only)
@@ -1749,15 +2172,22 @@ class GameController:
             pygame.mouse.set_cursor(pygame.SYSTEM_CURSOR_ARROW)
             
             QMessageBox.information(None, "Import Complete", f"Successfully imported:\n- {white_count} white traps\n- {black_count} black traps")
-            self.trap_service.all_traps = self.trap_repository.get_all_traps()
+            
+            # După import, forțăm reîmprospătarea datelor
+            if os.path.exists(TrapService.CACHE_FILE_PATH):
+                os.remove(TrapService.CACHE_FILE_PATH)
+            self.trap_service = TrapService(self.trap_repository)
             self._update_suggestions()
 
-        # Creăm și afișăm fereastra de dialog
-        dialog = QtImportWindow(self.settings_service, start_import_logic, self._clear_database)
-        # .exec() o face modală, dar stabilă datorită integrării Qt
+        # Creăm și afișăm fereastra de dialog, pasând TOATE callback-urile necesare
+        dialog = QtImportWindow(
+            self.settings_service, 
+            start_import_logic, 
+            self._clear_database,
+            self._run_database_audit  # Pasăm noua funcție de audit aici
+        )
         dialog.exec()
         
-
     def _import_pgn_folder(self) -> None:
         """Opens a folder dialog using PySide6 to select a directory."""
         if not QT_AVAILABLE:
@@ -1792,6 +2222,41 @@ class GameController:
             # etc... celelalte câmpuri resetate
         )
         self.move_history_forward = []
+
+    def _run_database_audit(self, max_moves: int):
+        """Orchestrates the database audit and refreshes the application state ONLY if changes were made."""
+        print("[CONTROLLER] Starting database audit process...")
+        pygame.mouse.set_cursor(pygame.SYSTEM_CURSOR_WAIT)
+
+        # 1. Creează și rulează auditorul
+        auditor = DatabaseAuditor(self.trap_repository)
+        report, changes_were_made = auditor.run_audit(max_moves)
+        
+        pygame.mouse.set_cursor(pygame.SYSTEM_CURSOR_ARROW)
+
+        # 2. Afișează raportul
+        QMessageBox.information(self.qt_app.activeWindow(), "Audit Report", report)
+        
+        # 3. CRUCIAL: Reîmprospătează datele aplicației DOAR DACĂ A FOST NECESAR
+        if changes_were_made:
+            print("[CONTROLLER] Audit made changes. Refreshing TrapService and suggestions...")
+            
+            # Șterge fișierul cache dacă există, forțând reconstruirea lui
+            if os.path.exists(TrapService.CACHE_FILE_PATH):
+                try:
+                    os.remove(TrapService.CACHE_FILE_PATH)
+                    print("[CONTROLLER] Removed stale cache file.")
+                except OSError as e:
+                    print(f"[CONTROLLER] Error removing cache file: {e}")
+
+            # Re-inițializează serviciul pentru a încărca datele curate
+            self.trap_service = TrapService(self.trap_repository)
+            self._update_suggestions()
+            
+            QMessageBox.information(self.qt_app.activeWindow(), "Success", "Database was modified. Application data has been refreshed.")
+        else:
+            print("[CONTROLLER] Audit found no issues. No refresh needed.")
+            QMessageBox.information(self.qt_app.activeWindow(), "Success", "Database is clean. No changes were made.")
 
 def main():
     """Main entry point."""
