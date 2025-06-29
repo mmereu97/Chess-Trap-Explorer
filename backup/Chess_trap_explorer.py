@@ -830,6 +830,16 @@ class QueenTrapService:
             
         print(f"[QUEEN TRAP SERVICE] Trap {trap.id} added dynamically to memory.")
 
+    def count_matching_traps(self, game_state: GameState) -> int:
+        """Numără capcanele custom care se potrivesc cu poziția curentă."""
+        if not self.all_traps or game_state.is_recording:
+            return 0
+            
+        if not game_state.move_history:
+             return sum(1 for trap in self.all_traps if trap.color == game_state.current_player)
+
+        return len(self._get_matches_for_current_position(game_state))
+
 class PGNImportService:
     """Service for importing traps from PGN files."""
     
@@ -1353,65 +1363,6 @@ class Renderer:
         self.small_font = pygame.font.Font(None, 24)
         self.large_font = pygame.font.Font(None, 48)
     
-    def render_start_screen(self, surface: pygame.Surface, selected_color: chess.Color) -> Dict[str, pygame.Rect]:
-        """Render the start screen."""
-        surface.fill((30, 30, 30))
-        
-        button_rects = {}
-        
-        # Title
-        title_text = "Chess Trap Trainer - Clean Architecture"
-        title_surface = self.large_font.render(title_text, True, self.config.TEXT_COLOR)
-        title_rect = title_surface.get_rect(center=(self.config.WIDTH // 2, 100))
-        surface.blit(title_surface, title_rect)
-        
-        # Instructions
-        instructions = "Choose your color:"
-        inst_surface = self.font.render(instructions, True, self.config.TEXT_COLOR)
-        inst_rect = inst_surface.get_rect(center=(self.config.WIDTH // 2, 200))
-        surface.blit(inst_surface, inst_rect)
-        
-        # Color buttons
-        button_width, button_height = 300, 50
-        center_x = self.config.WIDTH // 2
-        y_pos = 250
-        
-        white_rect = pygame.Rect(center_x - button_width // 2, y_pos, button_width, button_height)
-        white_color = (100, 100, 100) if selected_color == chess.WHITE else (70, 70, 70)
-        pygame.draw.rect(surface, white_color, white_rect, border_radius=5)
-        pygame.draw.rect(surface, self.config.BORDER_COLOR, white_rect, 2, border_radius=5)
-        white_text = self.font.render("Play as White", True, self.config.TEXT_COLOR)
-        surface.blit(white_text, white_text.get_rect(center=white_rect.center))
-        button_rects["white"] = white_rect
-        y_pos += 60
-
-        black_rect = pygame.Rect(center_x - button_width // 2, y_pos, button_width, button_height)
-        black_color = (100, 100, 100) if selected_color == chess.BLACK else (70, 70, 70)
-        pygame.draw.rect(surface, black_color, black_rect, border_radius=5)
-        pygame.draw.rect(surface, self.config.BORDER_COLOR, black_rect, 2, border_radius=5)
-        black_text = self.font.render("Play as Black", True, self.config.TEXT_COLOR)
-        surface.blit(black_text, black_text.get_rect(center=black_rect.center))
-        button_rects["black"] = black_rect
-        y_pos += 80
-
-        # Start button
-        start_rect = pygame.Rect(center_x - 100, y_pos, 200, button_height)
-        pygame.draw.rect(surface, (0, 120, 0), start_rect, border_radius=5)
-        pygame.draw.rect(surface, self.config.BORDER_COLOR, start_rect, 2, border_radius=5)
-        start_text = self.font.render("Start Game", True, self.config.TEXT_COLOR)
-        surface.blit(start_text, start_text.get_rect(center=start_rect.center))
-        button_rects["start"] = start_rect
-        y_pos += 80
-
-        # --- BUTON NOU: DATABASE INFO ---
-        info_rect = pygame.Rect(center_x - 125, y_pos, 250, 40)
-        pygame.draw.rect(surface, (0, 80, 120), info_rect, border_radius=5) # Albastru închis
-        pygame.draw.rect(surface, self.config.BORDER_COLOR, info_rect, 2, border_radius=5)
-        info_text = self.small_font.render("Database Info", True, self.config.TEXT_COLOR)
-        surface.blit(info_text, info_text.get_rect(center=info_rect.center))
-        button_rects["info"] = info_rect
-
-        return button_rects
     
     def render_game_screen(self, surface: pygame.Surface, state: GameState, 
                            suggestions: List[MoveSuggestion], total_matching_traps: int,
@@ -1454,10 +1405,9 @@ class Renderer:
         return all_button_rects
     
     def render_control_panel(self, surface: pygame.Surface, state: GameState, move_history: List[str]) -> Dict[str, pygame.Rect]:
-        """Render the control panel with buttons AND the move history panel."""
+        """Render the main control panel with integrated functionality."""
         button_rects = {}
         
-        # Fundalul panoului principal
         panel_rect = pygame.Rect(0, 0, self.config.BUTTONS_WIDTH, self.config.HEIGHT)
         pygame.draw.rect(surface, self.config.PANEL_COLOR, panel_rect)
         pygame.draw.rect(surface, self.config.BORDER_COLOR, panel_rect, 2)
@@ -1467,39 +1417,42 @@ class Renderer:
         surface.blit(title_surface, (10, y_offset))
         y_offset += 40
 
-        # --- AICI ESTE CORECȚIA FINALĂ (DE DATA ASTA PE BUNE) ---
-        # Ordonare conform specificației: < > sus, |< >| jos
-        nav_buttons = [
-            ("<", "one_back"), 
-            (">", "one_forward"),
-            ("|<", "to_start"), 
-            (">|", "to_end") 
-        ]
+        nav_buttons = [("<", "one_back"), (">", "one_forward"), ("|<", "to_start"), (">|", "to_end")]
         button_width, button_height, spacing = 80, 35, 10
         for i, (text, action) in enumerate(nav_buttons):
-            col = i % 2
-            row = i // 2
-            x = 20 + col * (button_width + spacing)
-            y = y_offset + row * (button_height + spacing)
-            rect = pygame.Rect(x, y, button_width, button_height)
+            col, row = i % 2, i // 2
+            rect = pygame.Rect(20 + col * (button_width + spacing), y_offset + row * (button_height + spacing), button_width, button_height)
             pygame.draw.rect(surface, self.config.BUTTON_COLOR, rect, border_radius=3)
             pygame.draw.rect(surface, self.config.BORDER_COLOR, rect, 1, border_radius=3)
             text_surf = self.small_font.render(text, True, self.config.TEXT_COLOR)
             surface.blit(text_surf, text_surf.get_rect(center=rect.center))
             button_rects[action] = rect
-        y_offset += 2 * (button_height + spacing)
+        y_offset += 2 * (button_height + spacing) + 10
+
+        # Butonul contextual pentru schimbarea culorii
+        if state.current_player == chess.WHITE:
+            text, action = "Play as Black", "play_as_black"
+        else:
+            text, action = "Play as White", "play_as_white"
         
-        # Butoane de acțiune
+        rect = pygame.Rect(20, y_offset, self.config.BUTTONS_WIDTH - 40, 35)
+        pygame.draw.rect(surface, (100, 100, 100), rect, border_radius=3)
+        text_surf = self.small_font.render(text, True, self.config.TEXT_COLOR)
+        surface.blit(text_surf, text_surf.get_rect(center=rect.center))
+        button_rects[action] = rect
+        y_offset += 45
+
+        # Butoane de acțiune principale
         action_buttons = [
-            ("Record Trap", "record", (0, 120, 0)),
+            ("Record New Trap", "record", (0, 120, 0)),
             ("Import / Audit", "import_pgn", (0, 100, 150)),
-            ("Main Menu", "main_menu", (150, 150, 0))
+            ("Database Info", "db_info", (0, 80, 120)),
+            ("Reset Game", "main_menu", (150, 150, 0)) # Main Menu este acum Reset
         ]
         for text, action, color in action_buttons:
             rect = pygame.Rect(20, y_offset, self.config.BUTTONS_WIDTH - 40, 35)
             if action == "record" and state.is_recording:
-                color = (180, 0, 0)
-                text = "Stop Recording"
+                color, text = (180, 0, 0), "Confirm/Stop"
             pygame.draw.rect(surface, color, rect, border_radius=3)
             text_surf = self.small_font.render(text, True, self.config.TEXT_COLOR)
             surface.blit(text_surf, text_surf.get_rect(center=rect.center))
@@ -1982,20 +1935,16 @@ class GameController:
         
         self.qt_app = QApplication.instance() 
         if self.qt_app is None:
-            print("[DEBUG INIT] Creating new QApplication instance.")
             self.qt_app = QApplication([])
         
         pygame.init()
         
         self.config = UIConfig()
         
-        # MODIFICAT: Inițializăm ambele repository-uri și servicii
         self.trap_repository = TrapRepository()
-        self.queen_trap_repository = QueenTrapRepository() # NOU
-        
+        self.queen_trap_repository = QueenTrapRepository()
         self.trap_service = TrapService(self.trap_repository)
-        self.queen_trap_service = QueenTrapService(self.queen_trap_repository) # NOU
-
+        self.queen_trap_service = QueenTrapService(self.queen_trap_repository)
         self.pgn_service = PGNImportService(self.trap_repository)
         self.settings_service = SettingsService()
         self.opening_db = OpeningDatabase()
@@ -2007,30 +1956,23 @@ class GameController:
         self.input_handler = InputHandler(self.config)
         self.renderer = Renderer(self.config, self.piece_loader)
         
-        initial_board = chess.Board()
-        self.current_state = GameState(board=initial_board, current_player=chess.WHITE)
-        self.text_input_visual = pygame_textinput.TextInputVisualizer()
-        self.show_start_screen = True
-        self.selected_color = chess.WHITE
+        self.current_state = GameState(board=chess.Board(), current_player=chess.WHITE)
         self.flipped = False
         self.move_history_forward = []
         self.current_suggestions = []
-        self.highlighted_moves = []
         
-        self.copy_pgn_button_rect = None 
+        # NOU: Atribut pentru a stoca numărul total de capcane potrivite
+        self.total_matching_traps = 0
         
-        print("[DEBUG INIT] GameController initialization complete!")
-    
+        print("[DEBUG INIT] GameController initialization complete! Will start game directly.")
     
     def run(self) -> None:
-        """Main game loop that also manages the Qt event loop."""
         print("[DEBUG MAIN] Starting main game loop...")
-        
         clock = pygame.time.Clock()
         running = True
         
-        # Asigură-te că sugestiile inițiale sunt încărcate corect
-        self._update_suggestions() # Folosim direct metoda care știe de ambele tipuri de capcane
+        # Pornim primul joc implicit ca Alb
+        self._start_game(chess.WHITE)
 
         while running:
             if self.qt_app:
@@ -2039,8 +1981,8 @@ class GameController:
             events = pygame.event.get()
             
             if self.current_state.is_recording:
-                if self.text_input_visual.update(events):
-                    self._stop_recording()
+                # `text_input_visual` nu mai este folosit, putem elimina referințele la el dacă dorim
+                pass
 
             for event in events:
                 if event.type == pygame.QUIT:
@@ -2051,106 +1993,75 @@ class GameController:
                     continue
 
                 if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
-                    if self.show_start_screen:
-                        self._handle_start_screen_click(event.pos)
-                    else:
-                        self._handle_game_mousedown(event.pos)
+                    # Acum se apelează direct handler-ul de joc
+                    self._handle_game_mousedown(event.pos)
                 
                 elif event.type == pygame.MOUSEBUTTONUP and event.button == 1:
-                    if not self.show_start_screen and self.current_state.dragging_piece:
+                    if not self.current_state.is_recording and self.current_state.dragging_piece:
                         self._handle_game_mouseup(event.pos)
                 
                 elif event.type == pygame.MOUSEMOTION:
-                    if not self.show_start_screen and self.current_state.dragging_piece:
+                    if not self.current_state.is_recording and self.current_state.dragging_piece:
                         self.current_state.drag_pos = event.pos
 
                 elif event.type == pygame.KEYDOWN:
-                    if self.current_state.is_recording and event.key == pygame.K_RETURN:
-                        self._stop_recording()
+                     # Am scos verificarea pentru text input, deoarece a fost eliminată
+                     pass
+
 
             # --- Randarea Pygame ---
             self.screen.fill((30, 30, 30))
             
-            if self.show_start_screen:
-                self.renderer.render_start_screen(self.screen, self.selected_color)
-            else:
-                # --- ACESTA ESTE BLOCUL DE RANDARE COMPLET ȘI CORECTAT ---
-                all_buttons = self.renderer.render_control_panel(self.screen, self.current_state, self.current_state.move_history)
-                self.copy_pgn_button_rect = all_buttons.get("copy_pgn")
-
-                self.renderer.render_board(self.screen, self.current_state, self.flipped)
-                self.renderer.render_pieces(
-                    self.screen, self.current_state.board, self.piece_loader,
-                    self.current_state.selected_square, self.flipped,
-                    self.current_state.dragging_piece, self.current_state.drag_pos
-                )
-                
-                # Numărul total de capcane este pur și simplu lungimea listei de sugestii curente,
-                # deoarece aceasta conține deja toate opțiunile combinate.
-                total_matching = len(self.current_suggestions)
-                
-                # Pasăm direct self.current_suggestions, care este acum menținut corect
-                # de metoda _update_suggestions() la fiecare schimbare de tură.
-                suggestion_buttons = self.renderer.render_suggestions_panel(
-                    self.screen, self.current_state, self.current_suggestions, total_matching
-                )
-                
-                white_info, black_info = self.opening_db.get_opening_phase_info(
-                    self.current_state.board, 
-                    self.current_state.move_history
-                )
-                self.renderer.render_status(self.screen, self.current_state, white_info, black_info)
-                
-                if self.current_state.is_recording:
-                     self.screen.blit(self.text_input_visual.surface, (self.config.LEFT_MARGIN, self.config.HEIGHT - 50))
+            # Randăm direct ecranul de joc
+            # --- AICI ESTE MODIFICAREA ---
+            total_matching = self.total_matching_traps
+            
+            all_buttons = self.renderer.render_control_panel(self.screen, self.current_state, self.current_state.move_history)
+            
+            suggestion_buttons = self.renderer.render_suggestions_panel(
+                self.screen, self.current_state, self.current_suggestions, total_matching
+            )
+            
+            white_info, black_info = self.opening_db.get_opening_phase_info(
+                self.current_state.board, 
+                self.current_state.move_history
+            )
+            
+            self.renderer.render_board(self.screen, self.current_state, self.flipped)
+            self.renderer.render_pieces(
+                self.screen, self.current_state.board, self.piece_loader,
+                self.current_state.selected_square, self.flipped,
+                self.current_state.dragging_piece, self.current_state.drag_pos
+            )
+            self.renderer.render_status(self.screen, self.current_state, white_info, black_info)
 
             pygame.display.flip()
             clock.tick(60)
         
         print("[DEBUG MAIN] Main loop ended")
         pygame.quit()
-    
-    def _handle_start_screen_click(self, pos: Tuple[int, int]) -> None: # Am schimbat return type la None
-        """Handle clicks on the start screen."""
-        button_rects = self.renderer.render_start_screen(self.screen, self.selected_color)
-        
-        action = self.input_handler.handle_button_click(pos, button_rects)
-        
-        if action == "white":
-            self.selected_color = chess.WHITE
-        elif action == "black":
-            self.selected_color = chess.BLACK
-        elif action == "start":
-            self._start_game(self.selected_color)
-        elif action == "info": # --- CAZ NOU ---
-            self._show_database_info()
 
-    def _start_game(self, color: chess.Color) -> None:
-        """Start a new game with the specified color."""
-        print(f"[DEBUG START] Starting game with color: {chess.COLOR_NAMES[color]}")
-        
+    
+    def _start_game(self, color: chess.Color, is_recording: bool = False) -> None:
+        """Starts a new game or a new recording session."""
+        if is_recording:
+            print("[REC] New recording session started. Board is reset.")
+        else:
+            print(f"[DEBUG START] Starting new game as {chess.COLOR_NAMES[color]}.")
+
         self.current_state = GameState(
             board=chess.Board(),
             current_player=color,
-            is_recording=False,
-            move_history=[],
-            selected_square=None,
-            dragging_piece=None,
-            drag_pos=None
+            is_recording=is_recording
         )
         
         self.flipped = (color == chess.BLACK)
-        self.show_start_screen = False
         self.move_history_forward = []
         
-        print(f"[DEBUG START] Game started - Flipped: {self.flipped}")
-        print(f"[DEBUG START] Initial board: {self.current_state.board.fen()}")
-        
-        # --- AICI ESTE CORECȚIA ESENȚIALĂ ---
-        # Actualizăm sugestiile imediat și le stocăm în self.current_suggestions
-        # pentru a fi disponibile la prima randare a ecranului de joc.
-        self.current_suggestions = self.trap_service.get_aggregated_suggestions(self.current_state)
-        print(f"[DEBUG START] Initial suggestions loaded. Found {len(self.current_suggestions)} move options.")
+        if not is_recording:
+            self._update_suggestions()
+        else:
+            self.current_suggestions = [] # Ascundem sugestiile în modul record
 
     def _clear_database(self):
         """Handles clearing the database using a non-blocking QMessageBox from PySide6."""
@@ -2212,7 +2123,7 @@ class GameController:
         all_button_rects.update(control_rects)
         
         # 2. Butoanele din panoul de sugestii
-        total_matching = self.trap_service.count_matching_traps(self.current_state)
+        total_matching = self.total_matching_traps
         suggestion_rects = self.renderer.render_suggestions_panel(
             pygame.Surface((self.config.SUGGESTIONS_WIDTH, self.config.HEIGHT)),
             self.current_state,
@@ -2402,32 +2313,29 @@ class GameController:
         
     def _update_suggestions(self) -> None:
         """
-        Updates the list of suggestions by querying both trap services, combining
-        the results, and prioritizing queen traps.
+        Updates the list of suggestions and the total count of matching trap lines.
         """
-        self.current_suggestions = []
-        if self.current_state.board.turn == self.current_state.current_player:
-            checkmate_suggs = self.trap_service.get_aggregated_suggestions(self.current_state)
-            queen_suggs = self.queen_trap_service.get_aggregated_suggestions(self.current_state)
-            
-            all_suggs = checkmate_suggs + queen_suggs
-            
-            # --- NOUA LOGICĂ DE SORTARE ---
-            # Sortăm în doi pași:
-            # 1. Prioritizăm 'queen_hunter' (care va fi considerat 'mai mic' și va veni primul).
-            # 2. Pentru același tip, sortăm descrescător după numărul de capcane.
-            # Cheia de sortare este un tuplu: (prioritate_tip, -numar_capcane).
-            # `s.trap_type == 'checkmate'` va evalua la 0 (False) pentru queen traps
-            # și la 1 (True) pentru checkmate traps, sortându-le corect.
-            # `-s.trap_count` sortează descrescător.
-            
-            all_suggs.sort(key=lambda s: (s.trap_type == 'checkmate', -s.trap_count))
-            
-            self.current_suggestions = all_suggs
-            print(f"[DEBUG] Updated suggestions. Found {len(checkmate_suggs)} checkmate and {len(queen_suggs)} queen trap options. Queen traps prioritized.")
-        else:
-            # Dacă nu e rândul nostru, lista de sugestii trebuie să fie goală.
+        if self.current_state.board.turn != self.current_state.current_player or self.current_state.is_recording:
             self.current_suggestions = []
+            self.total_matching_traps = 0
+            return
+
+        # Obținem sugestiile de la ambele servicii
+        checkmate_suggs = self.trap_service.get_aggregated_suggestions(self.current_state)
+        queen_suggs = self.queen_trap_service.get_aggregated_suggestions(self.current_state)
+        
+        # Combinăm și sortăm sugestiile de mutări unice
+        all_suggs = checkmate_suggs + queen_suggs
+        all_suggs.sort(key=lambda s: (s.trap_type == 'checkmate', -s.trap_count))
+        self.current_suggestions = all_suggs
+        
+        # --- AICI ESTE CALULUL CORECT PENTRU NUMĂRUL TOTAL ---
+        # Numărăm totalul liniilor individuale, nu al sugestiilor unice
+        total_checkmates = self.trap_service.count_matching_traps(self.current_state)
+        total_queens = self.queen_trap_service.count_matching_traps(self.current_state)
+        self.total_matching_traps = total_checkmates + total_queens
+
+        print(f"[DEBUG] Updated suggestions. Unique moves: {len(all_suggs)}. Total matching lines: {self.total_matching_traps}")
 
     def _manage_queen_traps(self):
         """Opens the Queen Trap management dialog."""
@@ -2456,34 +2364,35 @@ class GameController:
     def _handle_action(self, action: str) -> None:
         """Handle various game actions with context-aware recording."""
         
-        # Logica de restricționare în modul record rămâne
         allowed_in_recording = {"record", "main_menu", "one_back", "one_forward"}
         if self.current_state.is_recording and action not in allowed_in_recording:
             print(f"[REC] Action '{action}' disabled while recording.")
             return
 
-        if action == "record":
-            if self.current_state.is_recording:
-                # Dacă deja înregistrăm, oprim și deschidem dialogul
-                self._handle_stop_recording_request(self.current_state.recording_history)
-            else:
-                # Dacă nu înregistrăm, verificăm contextul
-                if not self.current_state.move_history:
-                    # Nu există istoric, deci începem o înregistrare nouă de la zero
-                    self._start_recording()
-                else:
-                    # Există un istoric, deci vrem să salvăm linia curentă
-                    print("[REC] Attempting to save current game line...")
-                    self._handle_stop_recording_request(self.current_state.move_history)
-            return # Terminăm după ce am tratat acțiunea de record
-
-        # Restul acțiunilor
+        # --- Acțiuni Noi ---
+        if action == "play_as_white":
+            self._start_game(chess.WHITE)
+            return
+        if action == "play_as_black":
+            self._start_game(chess.BLACK)
+            return
+        if action == "db_info":
+            self._show_database_info()
+            return
+        # ------------------
+        
         if action == "to_start": self._go_to_start()
         elif action == "one_back": self._go_back_one()
         elif action == "one_forward": self._go_forward_one()
         elif action == "to_end": self._go_to_end()
+        elif action == "record":
+            if not self.current_state.is_recording:
+                self._start_game(self.current_state.current_player, is_recording=True) # Pornim un joc nou în mod record
+            else:
+                self._handle_stop_recording_request(self.current_state.recording_history)
         elif action == "import_pgn": self._import_pgn_file()
-        elif action == "main_menu": self._return_to_main_menu()
+        elif action == "main_menu": 
+            self._start_game(self.current_state.current_player) # Main Menu acum resetează jocul
         elif action.startswith("suggestion_"):
             if not self.current_state.is_recording:
                 idx = int(action.split("_")[1])
@@ -2792,17 +2701,7 @@ class GameController:
             self.settings_service.update_setting("last_pgn_directory", folder_path)
         else:
             print("[IMPORT] Folder selection cancelled.")
-    
-    def _return_to_main_menu(self) -> None:
-        """Return to the main menu."""
-        self.show_start_screen = True
-        # Reset game state
-        self.current_state = GameState(
-            board=chess.Board(),
-            current_player=chess.WHITE,
-            # etc... celelalte câmpuri resetate
-        )
-        self.move_history_forward = []
+
 
     def _run_database_audit(self, max_moves: int):
         """Orchestrates the database audit and refreshes the application state ONLY if changes were made."""

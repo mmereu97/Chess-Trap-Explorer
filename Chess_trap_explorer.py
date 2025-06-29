@@ -830,6 +830,16 @@ class QueenTrapService:
             
         print(f"[QUEEN TRAP SERVICE] Trap {trap.id} added dynamically to memory.")
 
+    def count_matching_traps(self, game_state: GameState) -> int:
+        """Numără capcanele custom care se potrivesc cu poziția curentă."""
+        if not self.all_traps or game_state.is_recording:
+            return 0
+            
+        if not game_state.move_history:
+             return sum(1 for trap in self.all_traps if trap.color == game_state.current_player)
+
+        return len(self._get_matches_for_current_position(game_state))
+
 class PGNImportService:
     """Service for importing traps from PGN files."""
     
@@ -1925,7 +1935,6 @@ class GameController:
         
         self.qt_app = QApplication.instance() 
         if self.qt_app is None:
-            print("[DEBUG INIT] Creating new QApplication instance.")
             self.qt_app = QApplication([])
         
         pygame.init()
@@ -1934,10 +1943,8 @@ class GameController:
         
         self.trap_repository = TrapRepository()
         self.queen_trap_repository = QueenTrapRepository()
-        
         self.trap_service = TrapService(self.trap_repository)
         self.queen_trap_service = QueenTrapService(self.queen_trap_repository)
-
         self.pgn_service = PGNImportService(self.trap_repository)
         self.settings_service = SettingsService()
         self.opening_db = OpeningDatabase()
@@ -1949,16 +1956,15 @@ class GameController:
         self.input_handler = InputHandler(self.config)
         self.renderer = Renderer(self.config, self.piece_loader)
         
-        # MODIFICAT: Nu mai avem ecran de start. Starea inițială este setată, dar goală.
-        # Jocul propriu-zis va fi pornit în metoda `run`.
         self.current_state = GameState(board=chess.Board(), current_player=chess.WHITE)
         self.flipped = False
         self.move_history_forward = []
         self.current_suggestions = []
         
-        # Am șters referințele la `show_start_screen` și `selected_color`
+        # NOU: Atribut pentru a stoca numărul total de capcane potrivite
+        self.total_matching_traps = 0
         
-        print("[DEBUG INIT] GameController initialization complete! Will start game directly.")    
+        print("[DEBUG INIT] GameController initialization complete! Will start game directly.")
     
     def run(self) -> None:
         print("[DEBUG MAIN] Starting main game loop...")
@@ -2007,7 +2013,8 @@ class GameController:
             self.screen.fill((30, 30, 30))
             
             # Randăm direct ecranul de joc
-            total_matching = len(self.current_suggestions)
+            # --- AICI ESTE MODIFICAREA ---
+            total_matching = self.total_matching_traps
             
             all_buttons = self.renderer.render_control_panel(self.screen, self.current_state, self.current_state.move_history)
             
@@ -2116,7 +2123,7 @@ class GameController:
         all_button_rects.update(control_rects)
         
         # 2. Butoanele din panoul de sugestii
-        total_matching = self.trap_service.count_matching_traps(self.current_state)
+        total_matching = self.total_matching_traps
         suggestion_rects = self.renderer.render_suggestions_panel(
             pygame.Surface((self.config.SUGGESTIONS_WIDTH, self.config.HEIGHT)),
             self.current_state,
@@ -2306,32 +2313,29 @@ class GameController:
         
     def _update_suggestions(self) -> None:
         """
-        Updates the list of suggestions by querying both trap services, combining
-        the results, and prioritizing queen traps.
+        Updates the list of suggestions and the total count of matching trap lines.
         """
-        self.current_suggestions = []
-        if self.current_state.board.turn == self.current_state.current_player:
-            checkmate_suggs = self.trap_service.get_aggregated_suggestions(self.current_state)
-            queen_suggs = self.queen_trap_service.get_aggregated_suggestions(self.current_state)
-            
-            all_suggs = checkmate_suggs + queen_suggs
-            
-            # --- NOUA LOGICĂ DE SORTARE ---
-            # Sortăm în doi pași:
-            # 1. Prioritizăm 'queen_hunter' (care va fi considerat 'mai mic' și va veni primul).
-            # 2. Pentru același tip, sortăm descrescător după numărul de capcane.
-            # Cheia de sortare este un tuplu: (prioritate_tip, -numar_capcane).
-            # `s.trap_type == 'checkmate'` va evalua la 0 (False) pentru queen traps
-            # și la 1 (True) pentru checkmate traps, sortându-le corect.
-            # `-s.trap_count` sortează descrescător.
-            
-            all_suggs.sort(key=lambda s: (s.trap_type == 'checkmate', -s.trap_count))
-            
-            self.current_suggestions = all_suggs
-            print(f"[DEBUG] Updated suggestions. Found {len(checkmate_suggs)} checkmate and {len(queen_suggs)} queen trap options. Queen traps prioritized.")
-        else:
-            # Dacă nu e rândul nostru, lista de sugestii trebuie să fie goală.
+        if self.current_state.board.turn != self.current_state.current_player or self.current_state.is_recording:
             self.current_suggestions = []
+            self.total_matching_traps = 0
+            return
+
+        # Obținem sugestiile de la ambele servicii
+        checkmate_suggs = self.trap_service.get_aggregated_suggestions(self.current_state)
+        queen_suggs = self.queen_trap_service.get_aggregated_suggestions(self.current_state)
+        
+        # Combinăm și sortăm sugestiile de mutări unice
+        all_suggs = checkmate_suggs + queen_suggs
+        all_suggs.sort(key=lambda s: (s.trap_type == 'checkmate', -s.trap_count))
+        self.current_suggestions = all_suggs
+        
+        # --- AICI ESTE CALULUL CORECT PENTRU NUMĂRUL TOTAL ---
+        # Numărăm totalul liniilor individuale, nu al sugestiilor unice
+        total_checkmates = self.trap_service.count_matching_traps(self.current_state)
+        total_queens = self.queen_trap_service.count_matching_traps(self.current_state)
+        self.total_matching_traps = total_checkmates + total_queens
+
+        print(f"[DEBUG] Updated suggestions. Unique moves: {len(all_suggs)}. Total matching lines: {self.total_matching_traps}")
 
     def _manage_queen_traps(self):
         """Opens the Queen Trap management dialog."""
