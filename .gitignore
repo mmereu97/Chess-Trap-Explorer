@@ -1,6 +1,27 @@
-.venv/
+# Fișiere specifice sistemului de operare
+*.swp
+*~
+.DS_Store
+
+# Fișiere generate de PyCharm/IDE
 .idea/
-build/
+.venv/
+venv/
+__pycache__/
+*.pyc
+
+# Fișiere executabile și de build
+*.exe
+*.dll
 dist/
-app_settings.json
-trap_index.cache
+build/
+
+# Fișiere de baze de date și temporare
+*.db
+*.db-shm
+*.db-wal
+*.sqlite3
+*.cache
+
+# Foldere de backup (dacă nu vrei să le urmărești)
+backup/
