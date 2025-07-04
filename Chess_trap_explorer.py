@@ -17,6 +17,7 @@ from pathlib import Path
 from collections import defaultdict  # <--- ADAUGĂ ACEASTĂ LINIE AICI
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from multiprocessing import cpu_count
+from functools import partial
 
 
 # Import tkinter with error handling
@@ -194,11 +195,13 @@ class UIConfig: # Numește-o direct UIConfig pentru a fi folosită
 # --- NOU: Adaugă această clasă după `ChessTrap` ---
 @dataclass
 class QueenTrap:
-    """Represents a queen-hunting trap."""
+    """Represents a custom recorded trap (mat, queen hunt, etc.)."""
     name: str
+    trap_type: str 
     moves: List[str]
-    color: chess.Color  # Culoarea care câștigă regina
+    color: chess.Color
     capture_square: chess.Square
+    created_at: Optional[str] = None # <-- ADAUGĂ SAU VERIFICĂ ACEASTĂ LINIE
     id: Optional[int] = None
 
 @dataclass
@@ -241,55 +244,106 @@ class TrapRepository:
     
     def __init__(self, db_path: str = "chess_traps.db"):
         self.db_path = db_path
+        # --- MODIFICARE CRUCIALĂ ---
+        # Apelăm migrarea direct la inițializare, înainte ca orice serviciu să citească datele.
         self._initialize_database()
     
     def _initialize_database(self) -> None:
-        """Initialize the database with required tables for all trap types."""
+        """Initialize the database and perform a one-time migration if needed."""
+        print("[DB MIGRATE] Checking database schema...")
         with sqlite3.connect(self.db_path) as conn:
-            # Tabela pentru capcane de mat
-            conn.execute("""
+            cursor = conn.cursor()
+            # Tabela pentru capcane de mat din PGN-uri (neschimbată)
+            cursor.execute("""
                 CREATE TABLE IF NOT EXISTS traps (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    name TEXT NOT NULL,
-                    moves TEXT NOT NULL,
-                    color INTEGER NOT NULL,
+                    id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL,
+                    moves TEXT NOT NULL, color INTEGER NOT NULL,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                )
-            """)
-            # NOU: Tabela pentru capcane de capturat regina
-            conn.execute("""
+                )""")
+            
+            # Tabela pentru capcanele custom
+            cursor.execute("""
                 CREATE TABLE IF NOT EXISTS queen_traps (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    name TEXT NOT NULL,
-                    moves TEXT NOT NULL,
-                    color INTEGER NOT NULL,
+                    id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL,
+                    moves TEXT NOT NULL, color INTEGER NOT NULL,
                     capture_square INTEGER NOT NULL
-                )
-            """)
+                )""")
+
+            # --- MIGRARE ONE-TIME (SIGURĂ) ---
+            cursor.execute("PRAGMA table_info(queen_traps)")
+            columns = [info[1] for info in cursor.fetchall()]
+
+            migrated = False
+            # Migrarea pentru 'trap_type' (rămâne)
+            if 'trap_type' not in columns:
+                print("[DB MIGRATE] Old 'queen_traps' table detected. Adding 'trap_type' column...")
+                cursor.execute("ALTER TABLE queen_traps ADD COLUMN trap_type TEXT NOT NULL DEFAULT 'QueenHunter'")
+                migrated = True
+                
+                cursor.execute("SELECT id, moves FROM queen_traps")
+                all_custom_traps = cursor.fetchall()
+                updates_to_make = []
+                for trap_id, moves_json in all_custom_traps:
+                    try:
+                        if json.loads(moves_json)[-1].endswith('#'):
+                            updates_to_make.append((trap_id,))
+                    except (json.JSONDecodeError, IndexError): continue
+                
+                if updates_to_make:
+                    print(f"[DB MIGRATE] Found {len(updates_to_make)} custom checkmates to re-classify.")
+                    cursor.executemany("UPDATE queen_traps SET trap_type = 'Checkmate' WHERE id = ?", updates_to_make)
+            
+            # --- NOUA LOGICĂ DE MIGRARE, COMPATIBILĂ ---
+            if 'created_at' not in columns:
+                print("[DB MIGRATE] Adding 'created_at' column to 'queen_traps' table (legacy compatible)...")
+                # Pasul 1: Adăugăm coloana, permițând valori NULL
+                cursor.execute("ALTER TABLE queen_traps ADD COLUMN created_at TIMESTAMP")
+                
+                # Pasul 2 (Opțional): Umplem datele existente cu data curentă
+                print("[DB MIGRATE] Back-filling timestamp for existing custom traps...")
+                cursor.execute("UPDATE queen_traps SET created_at = CURRENT_TIMESTAMP WHERE created_at IS NULL")
+                migrated = True
+                
+            if migrated:
+                print("[DB MIGRATE] Database migration complete.")
+            
             conn.commit()
-    
+        print("[DB MIGRATE] Schema is up to date.")
+
+    # ... restul metodelor din TrapRepository (save_trap, get_all_traps, etc.) rămân neschimbate ...
+    # (codul lor de mai jos nu trebuie modificat)
+
     def save_trap(self, trap: ChessTrap) -> int:
-        """Save a trap to the database and return its ID."""
+        """Saves a single checkmate trap (used by PGN import)."""
         with sqlite3.connect(self.db_path) as conn:
             cursor = conn.execute(
                 "INSERT INTO traps (name, moves, color) VALUES (?, ?, ?)",
                 (trap.name, json.dumps(trap.moves), int(trap.color))
             )
             conn.commit()
+            # Asigură-te că aceasta este ultima linie din funcție și că nu urmează nimic după ea.
             return cursor.lastrowid
-    
+
     def get_all_traps(self) -> List[ChessTrap]:
-        """Get all traps from database."""
+        """Gets ALL checkmate traps from the database."""
         traps = []
+        print("[DB PGN] Reading all traps from 'traps' table...")
         try:
             with sqlite3.connect(self.db_path) as conn:
+                # Fără LIMIT, fără condiții, citim tot.
                 cursor = conn.execute("SELECT id, name, moves, color FROM traps")
                 for row in cursor.fetchall():
                     trap_id, name, moves_json, color = row
                     moves = json.loads(moves_json)
-                    traps.append(ChessTrap(id=trap_id, name=name, moves=moves, color=bool(color)))
+                    traps.append(ChessTrap(
+                        id=trap_id, 
+                        name=name, 
+                        moves=moves, 
+                        color=bool(color)
+                    ))
+            print(f"[DB PGN] Successfully loaded {len(traps)} traps.")
         except sqlite3.Error as e:
-            print(f"[DB ERROR] Could not read traps: {e}")
+            print(f"[DB PGN ERROR] Could not read traps: {e}")
         return traps
     
     def get_total_trap_count(self) -> int:
@@ -370,7 +424,6 @@ class QueenTrapRepository:
 
     def save_trap(self, trap: QueenTrap) -> int:
         """Save a queen trap to the database and return its ID."""
-        # Verificăm dacă există deja un duplicat
         with sqlite3.connect(self.db_path) as conn:
             cursor = conn.execute(
                 "SELECT id FROM queen_traps WHERE moves = ? AND color = ?",
@@ -378,36 +431,49 @@ class QueenTrapRepository:
             )
             if cursor.fetchone():
                 print("[DB QUEEN] Duplicate queen trap found. Skipping save.")
-                return -1  # Returnăm un ID invalid pentru a semnala duplicatul
+                return -1
 
+        # --- MODIFICARE AICI: Folosim 'localtime' pentru a ajusta fusul orar ---
         with sqlite3.connect(self.db_path) as conn:
             cursor = conn.execute(
-                "INSERT INTO queen_traps (name, moves, color, capture_square) VALUES (?, ?, ?, ?)",
-                (trap.name, json.dumps(trap.moves), int(trap.color), trap.capture_square)
+                "INSERT INTO queen_traps (name, trap_type, moves, color, capture_square, created_at) VALUES (?, ?, ?, ?, ?, datetime('now', 'localtime'))",
+                (trap.name, trap.trap_type, json.dumps(trap.moves), int(trap.color), trap.capture_square)
             )
             conn.commit()
             return cursor.lastrowid
-    
+
     def get_all_traps(self) -> List[QueenTrap]:
-        """Get all queen traps from database."""
         traps = []
         try:
             with sqlite3.connect(self.db_path) as conn:
-                cursor = conn.execute("SELECT id, name, moves, color, capture_square FROM queen_traps")
-                for row in cursor.fetchall():
-                    trap_id, name, moves_json, color, capture_square = row
+                cursor = conn.cursor()
+                cursor.execute("SELECT id, name, trap_type, moves, color, capture_square, created_at FROM queen_traps")
+                
+                print("\n[DEBUG DB QUEEN] Reading all custom traps from database:")
+                all_rows = cursor.fetchall()
+                
+                for row in all_rows:
+                    # Afișăm rândul brut pentru debug
+                    print(f"  - Raw DB Row: {row}")
+                    
+                    trap_id, name, trap_type, moves_json, color, capture_square, created_at = row
                     moves = json.loads(moves_json)
+                    
                     traps.append(QueenTrap(
                         id=trap_id, 
                         name=name, 
+                        trap_type=trap_type, 
                         moves=moves, 
-                        color=bool(color),
-                        capture_square=int(capture_square)
+                        color=bool(color), 
+                        capture_square=int(capture_square),
+                        created_at=created_at
                     ))
+                print("[DEBUG DB QUEEN] Finished reading.\n")
+
         except sqlite3.Error as e:
             print(f"[DB QUEEN ERROR] Could not read queen traps: {e}")
         return traps
-        
+            
     def delete_trap_by_id(self, trap_id: int) -> None:
         """Deletes a specific queen trap by its ID."""
         with sqlite3.connect(self.db_path) as conn:
@@ -422,6 +488,19 @@ class QueenTrapRepository:
                 return cursor.fetchone()[0]
         except sqlite3.Error:
             return 0
+
+    def delete_checkmate_traps(self) -> int:
+        """Deletes all manually recorded checkmates from the queen_traps table.
+        
+        Returns:
+            The number of rows deleted.
+        """
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.execute("DELETE FROM queen_traps WHERE trap_type = 'Checkmate'")
+            conn.commit()
+            deleted_count = cursor.rowcount
+            print(f"[DB QUEEN] Deleted {deleted_count} custom checkmate traps.")
+            return deleted_count
 
 # Service Layer
 class TrapService:
@@ -535,22 +614,15 @@ class TrapService:
         return index
 
     def _get_matches_for_current_position(self, game_state: GameState) -> List[Tuple[ChessTrap, int]]:
-        """
-        Helper method to find all trap matches for the current board state using the index.
-        Returns a list of (trap_object, move_index_in_trap).
-        """
-        if game_state.is_recording or not hasattr(self, 'position_index'):
+        """Găsește TOATE capcanele care trec prin poziția curentă."""
+        if game_state.is_recording:
             return []
-            
         current_fen = game_state.board.shredder_fen()
         matching_entries = self.position_index.get(current_fen, [])
         
-        results = []
-        for trap_id, move_index in matching_entries:
-            trap = self.id_to_trap_map.get(trap_id)
-            if trap and trap.color == game_state.current_player:
-                results.append((trap, move_index))
-        return results
+        # Returnăm direct, fără a filtra după culoare aici
+        return [(self.id_to_trap_map[trap_id], move_index) 
+                for trap_id, move_index in matching_entries if trap_id in self.id_to_trap_map]
 
     def count_matching_traps(self, game_state: GameState) -> int:
         """Numără capcanele care se potrivesc cu poziția curentă, folosind indexul."""
@@ -563,51 +635,32 @@ class TrapService:
 
         return len(self._get_matches_for_current_position(game_state))
 
+    # --- ÎNLOCUIEȘTE COMPLET ÎN `TrapService` ---
     def get_aggregated_suggestions(self, game_state: GameState) -> List[MoveSuggestion]:
-        """Obține sugestii agregate pentru mat, adăugând tipul capcanei."""
-        if game_state.board.turn != game_state.current_player:
-            return []
-
-        # Logica pentru poziția de start
-        if not game_state.move_history:
-            move_groups = defaultdict(list)
-            player_color_at_turn = game_state.board.turn
-            
-            for trap in self.all_traps:
-                if trap.color == player_color_at_turn and trap.moves:
-                    first_move = trap.moves[0]
-                    move_groups[first_move].append(trap.moves)
-            
-            suggestions = [
-                MoveSuggestion(
-                    suggested_move=move_san,
-                    trap_count=len(continuations),
-                    example_trap_line=continuations[0],
-                    trap_type='checkmate'  # Specificăm tipul
-                ) for move_san, continuations in move_groups.items()
-            ]
-            suggestions.sort(key=lambda s: s.trap_count, reverse=True)
-            return suggestions
-            
-        # Logica pentru pozițiile intermediare
-        matches = self._get_matches_for_current_position(game_state)
+        if game_state.board.turn != game_state.current_player: return []
         move_groups = defaultdict(list)
         
-        for trap, move_index in matches:
-            if len(trap.moves) > move_index + 1:
-                next_move = trap.moves[move_index + 1]
-                move_groups[next_move].append(trap.moves[move_index + 1:])
+        if not game_state.move_history:
+            for trap in self.all_traps:
+                if trap.color == game_state.current_player and trap.moves:
+                    move_groups[trap.moves[0]].append(trap.moves)
+        else:
+            matches = self._get_matches_for_current_position(game_state)
+            for trap, move_index in matches:
+                if len(trap.moves) > move_index + 1:
+                    is_our_turn_in_trap = (move_index + 1) % 2 == (0 if trap.color == chess.WHITE else 1)
+                    if is_our_turn_in_trap:
+                        move_groups[trap.moves[move_index + 1]].append(trap.moves[move_index + 1:])
         
-        suggestions = [
+        return [
             MoveSuggestion(
-                suggested_move=move_san,
-                trap_count=len(continuations),
-                example_trap_line=continuations[0],
-                trap_type='checkmate'  # Specificăm tipul
-            ) for move_san, continuations in move_groups.items()
+                suggested_move=move,
+                trap_count=len(lines),
+                # CORECȚIE: lines[0] este deja continuarea completă de care avem nevoie
+                example_trap_line=lines[0], 
+                trap_type='checkmate'
+            ) for move, lines in move_groups.items()
         ]
-        suggestions.sort(key=lambda s: s.trap_count, reverse=True)
-        return suggestions
 
     def get_most_common_response(self, game_state: GameState) -> Optional[str]:
         """Găsește cel mai comun răspuns al adversarului folosind indexul."""
@@ -725,16 +778,14 @@ class QueenTrapService:
         return index
 
     def _get_matches_for_current_position(self, game_state: GameState) -> List[Tuple[QueenTrap, int]]:
-        if game_state.is_recording or not hasattr(self, 'position_index'):
+        """Găsește TOATE capcanele custom care trec prin poziția curentă."""
+        if game_state.is_recording:
             return []
         current_fen = game_state.board.shredder_fen()
         matching_entries = self.position_index.get(current_fen, [])
-        results = []
-        for trap_id, move_index in matching_entries:
-            trap = self.id_to_trap_map.get(trap_id)
-            if trap and trap.color == game_state.current_player:
-                results.append((trap, move_index))
-        return results
+
+        return [(self.id_to_trap_map[trap_id], move_index) 
+                for trap_id, move_index in matching_entries if trap_id in self.id_to_trap_map]
     
     def force_reload(self):
         """Forțează reîncărcarea datelor din repository și reconstruirea indexului."""
@@ -746,50 +797,33 @@ class QueenTrapService:
         print("[QUEEN TRAP SERVICE] Reload complete.")
 
     def get_aggregated_suggestions(self, game_state: GameState) -> List[MoveSuggestion]:
-        """Obține sugestii agregate pentru capturarea reginei."""
-        if game_state.board.turn != game_state.current_player:
-            return []
-
-        # Logica pentru poziția de start
-        if not game_state.move_history:
-            move_groups = defaultdict(list)
-            player_color_at_turn = game_state.board.turn
-            
-            for trap in self.all_traps:
-                if trap.color == player_color_at_turn and trap.moves:
-                    first_move = trap.moves[0]
-                    move_groups[first_move].append(trap.moves)
-            
-            suggestions = [
-                MoveSuggestion(
-                    suggested_move=move_san,
-                    trap_count=len(continuations),
-                    example_trap_line=continuations[0],
-                    trap_type='queen_hunter' # Specificăm tipul
-                ) for move_san, continuations in move_groups.items()
-            ]
-            suggestions.sort(key=lambda s: s.trap_count, reverse=True)
-            return suggestions
-
-        # Logica pentru pozițiile intermediare
-        matches = self._get_matches_for_current_position(game_state)
+        if game_state.board.turn != game_state.current_player: return []
         move_groups = defaultdict(list)
-        
-        for trap, move_index in matches:
-            if len(trap.moves) > move_index + 1:
-                next_move = trap.moves[move_index + 1]
-                move_groups[next_move].append(trap.moves[move_index + 1:])
-        
-        suggestions = [
+
+        if not game_state.move_history:
+            for trap in self.all_traps:
+                if trap.color == game_state.current_player and trap.moves:
+                    key = 'checkmate' if 'Checkmate' in trap.trap_type else 'queen_hunter'
+                    move_groups[(trap.moves[0], key)].append(trap.moves)
+        else:
+            matches = self._get_matches_for_current_position(game_state)
+            for trap, move_index in matches:
+                is_our_turn_in_trap = (move_index + 1) % 2 == (0 if trap.color == chess.WHITE else 1)
+                if trap.color == game_state.current_player and len(trap.moves) > move_index + 1 and is_our_turn_in_trap:
+                    next_move = trap.moves[move_index + 1]
+                    continuation = trap.moves[move_index + 1:]
+                    key = 'checkmate' if 'Checkmate' in trap.trap_type else 'queen_hunter'
+                    move_groups[(next_move, key)].append(continuation)
+
+        return [
             MoveSuggestion(
-                suggested_move=move_san,
-                trap_count=len(continuations),
-                example_trap_line=continuations[0],
-                trap_type='queen_hunter' # Specificăm tipul
-            ) for move_san, continuations in move_groups.items()
+                suggested_move=move,
+                trap_count=len(lines),
+                # CORECȚIE: lines[0] este deja continuarea completă
+                example_trap_line=lines[0], 
+                trap_type=type
+            ) for (move, type), lines in move_groups.items()
         ]
-        suggestions.sort(key=lambda s: s.trap_count, reverse=True)
-        return suggestions   
 
     def get_most_common_response(self, game_state: GameState) -> Optional[str]:
         """Găsește cel mai comun răspuns al adversarului pentru capcanele de regină."""
@@ -1417,6 +1451,7 @@ class Renderer:
         surface.blit(title_surface, (10, y_offset))
         y_offset += 40
 
+        # Butoanele de navigație rămân la fel
         nav_buttons = [("<", "one_back"), (">", "one_forward"), ("|<", "to_start"), (">|", "to_end")]
         button_width, button_height, spacing = 80, 35, 10
         for i, (text, action) in enumerate(nav_buttons):
@@ -1442,15 +1477,15 @@ class Renderer:
         button_rects[action] = rect
         y_offset += 45
 
-        # Butoane de acțiune principale
+        # Butoane de acțiune principale (FĂRĂ "Reset Game")
         action_buttons = [
             ("Record New Trap", "record", (0, 120, 0)),
             ("Import / Audit", "import_pgn", (0, 100, 150)),
             ("Database Info", "db_info", (0, 80, 120)),
-            ("Reset Game", "main_menu", (150, 150, 0)) # Main Menu este acum Reset
         ]
         for text, action, color in action_buttons:
             rect = pygame.Rect(20, y_offset, self.config.BUTTONS_WIDTH - 40, 35)
+            # Logica pentru schimbarea textului butonului "record" rămâne
             if action == "record" and state.is_recording:
                 color, text = (180, 0, 0), "Confirm/Stop"
             pygame.draw.rect(surface, color, rect, border_radius=3)
@@ -1459,7 +1494,7 @@ class Renderer:
             button_rects[action] = rect
             y_offset += 45
 
-        # Panoul de Istoric
+        # Panoul de Istoric (rămâne neschimbat)
         history_y_start = y_offset + 20
         history_panel_rect = pygame.Rect(10, history_y_start, self.config.BUTTONS_WIDTH - 20, self.config.HEIGHT - history_y_start - 20)
         pygame.draw.rect(surface, (40, 40, 40), history_panel_rect, border_radius=5)
@@ -1706,42 +1741,57 @@ class Renderer:
     
 if QT_AVAILABLE:
     class QtInfoDialog(QDialog):
-        """A simple dialog to display database statistics."""
-        def __init__(self, stats: Dict[str, str], parent=None):
+        """A dialog to display database statistics and provide management actions."""
+        def __init__(self, stats: Dict[str, str], on_export_pgn, on_delete_custom_mates, parent=None):
             super().__init__(parent)
-            self.setWindowTitle("Database Statistics")
-            self.setMinimumWidth(350)
-
-            layout = QVBoxLayout(self)
+            self.setWindowTitle("Database Statistics & Management")
+            self.setMinimumWidth(400) # Mărim puțin lățimea
             
+            self.on_export_pgn = on_export_pgn
+            self.on_delete_custom_mates = on_delete_custom_mates
+
+            main_layout = QVBoxLayout(self)
+            
+            # Partea de statistici (neschimbată)
             group_box = QGroupBox("Current Content")
             group_layout = QVBoxLayout()
-            
             for key, value in stats.items():
-                if value == "":
-                    line = QFrame()
-                    line.setFrameShape(QFrame.Shape.HLine)
-                    line.setFrameShadow(QFrame.Shadow.Sunken)
+                if key.startswith("separator"):
+                    line = QFrame(); line.setFrameShape(QFrame.Shape.HLine); line.setFrameShadow(QFrame.Shadow.Sunken)
                     group_layout.addWidget(line)
                 else:
                     h_layout = QHBoxLayout()
                     key_label = QLabel(f"{key}:")
-                    if key.strip().startswith('-'):
-                        key_label.setStyleSheet("padding-left: 20px;")
-
-                    value_label = QLabel(f"<b>{value}</b>")
-                    value_label.setAlignment(Qt.AlignmentFlag.AlignRight)
-                    
-                    h_layout.addWidget(key_label)
-                    h_layout.addWidget(value_label)
+                    if key.strip().startswith('-'): key_label.setStyleSheet("padding-left: 20px;")
+                    value_label = QLabel(value); value_label.setTextFormat(Qt.TextFormat.RichText); value_label.setAlignment(Qt.AlignmentFlag.AlignRight)
+                    h_layout.addWidget(key_label); h_layout.addWidget(value_label)
                     group_layout.addLayout(h_layout)
-
             group_box.setLayout(group_layout)
-            layout.addWidget(group_box)
+            main_layout.addWidget(group_box)
             
-            ok_button = QPushButton("OK")
+            # --- NOU: Secțiunea de acțiuni pentru custom checkmates ---
+            actions_group_box = QGroupBox("Custom Checkmate Migration")
+            actions_layout = QHBoxLayout()
+            
+            export_button = QPushButton("Export to PGN")
+            export_button.setToolTip("Exports all manually recorded checkmates to a PGN file.")
+            export_button.setStyleSheet("background-color: #A9DFBF;") # Verde
+            export_button.clicked.connect(self.on_export_pgn)
+
+            delete_button = QPushButton("Delete Custom Checkmates")
+            delete_button.setToolTip("Deletes all manually recorded checkmates from the custom database.\nUse this after exporting and successfully importing them.")
+            delete_button.setStyleSheet("background-color: #F5B7B1;") # Roșu
+            delete_button.clicked.connect(self.on_delete_custom_mates)
+
+            actions_layout.addWidget(export_button)
+            actions_layout.addWidget(delete_button)
+            actions_group_box.setLayout(actions_layout)
+            main_layout.addWidget(actions_group_box)
+
+            # Butonul de închidere
+            ok_button = QPushButton("Close")
             ok_button.clicked.connect(self.accept)
-            layout.addWidget(ok_button, 0, Qt.AlignmentFlag.AlignCenter)
+            main_layout.addWidget(ok_button, 0, Qt.AlignmentFlag.AlignCenter)
 
     class QtSaveConfirmDialog(QDialog):
         """A dialog to confirm, cancel, or continue a trap recording."""
@@ -1795,43 +1845,109 @@ if QT_AVAILABLE:
             return dialog.result
 
     class QtQueenTrapManager(QDialog):
-        """A Qt Dialog to view and delete recorded queen traps."""
-        def __init__(self, queen_trap_repo: QueenTrapRepository, on_trap_deleted, parent=None):
+        """A Qt Dialog to view, load, and delete recorded custom traps."""
+        def __init__(self, queen_trap_repo: QueenTrapRepository, 
+                     on_trap_deleted, on_trap_load, parent=None): # Am adăugat on_trap_load
             super().__init__(parent)
             self.repo = queen_trap_repo
             self.on_trap_deleted = on_trap_deleted
-            self.setWindowTitle("Queen Trap Manager")
-            self.setMinimumSize(500, 400)
+            self.on_trap_load = on_trap_load # Stocăm noul callback
+
+            self.setWindowTitle("Manage Custom Traps")
+            self.setMinimumSize(600, 500)
+            
             self.main_layout = QVBoxLayout(self)
-            scroll_area = QScrollArea(); scroll_area.setWidgetResizable(True)
+            
+            # Scroll Area
+            scroll_area = QScrollArea()
+            scroll_area.setWidgetResizable(True)
+            
             self.container_widget = QWidget()
             self.list_layout = QVBoxLayout(self.container_widget)
             self.list_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
+            
             scroll_area.setWidget(self.container_widget)
             self.main_layout.addWidget(scroll_area)
+            
+            # Buton de închidere
+            close_button = QPushButton("Close")
+            close_button.clicked.connect(self.accept)
+            self.main_layout.addWidget(close_button, 0, Qt.AlignmentFlag.AlignCenter)
+
             self.populate_list()
 
         def populate_list(self):
+            """Clears and repopulates the list of traps."""
+            # Șterge widget-urile vechi pentru a evita duplicatele
             while self.list_layout.count():
                 child = self.list_layout.takeAt(0)
-                if child.widget(): child.widget().deleteLater()
+                if child.widget():
+                    child.widget().deleteLater()
+
             all_traps = self.repo.get_all_traps()
+            # Sortăm după ID, de la cel mai nou la cel mai vechi. Este mai sigur decât a sorta după un string de dată.
+            all_traps.sort(key=lambda t: t.id or 0, reverse=True) 
+            
             if not all_traps:
-                self.list_layout.addWidget(QLabel("No queen traps recorded yet."))
+                self.list_layout.addWidget(QLabel("No custom traps recorded yet."))
                 return
+
             for trap in all_traps:
-                frame = QFrame(); frame.setFrameShape(QFrame.Shape.StyledPanel)
+                frame = QFrame()
+                frame.setFrameShape(QFrame.Shape.StyledPanel)
                 layout = QHBoxLayout(frame)
-                label = QLabel(f"<b>{trap.name}</b><br><small>{' '.join(trap.moves)}</small>")
-                delete_button = QPushButton("Delete"); delete_button.setFixedSize(60, 25)
-                delete_button.clicked.connect(lambda _, t_id=trap.id: self.delete_trap(t_id))
-                layout.addWidget(label); layout.addStretch(); layout.addWidget(delete_button)
+                
+                # --- AICI ESTE LOGICA ROBUSTĂ DE AFIȘARE A DATEI ---
+                date_str = ""
+                if trap.created_at:
+                    # Afișăm data ca string, dar eliminăm milisecundele dacă există.
+                    # Această metodă este foarte sigură și nu va genera erori.
+                    clean_date_str = str(trap.created_at).split('.')[0]
+                    date_str = f"<i>Recorded: {clean_date_str}</i><br>"
+
+                label_text = (f"<b>{trap.name}</b> (Type: {trap.trap_type})<br>"
+                              f"{date_str}"
+                              f"<small>{' '.join(trap.moves)}</small>")
+                
+                label = QLabel(label_text)
+                label.setWordWrap(True)
+                
+                load_button = QPushButton("Load")
+                load_button.setFixedSize(80, 30)
+                load_button.setToolTip("Load this trap onto the main board to view or edit it.")
+                load_button.setStyleSheet("background-color: #A9DFBF;")
+                load_button.clicked.connect(partial(self.load_trap, trap.moves))
+
+                delete_button = QPushButton("Delete")
+                delete_button.setFixedSize(80, 30)
+                delete_button.setToolTip("Permanently delete this trap.")
+                delete_button.setStyleSheet("background-color: #F5B7B1;")
+                delete_button.clicked.connect(partial(self.delete_trap, trap.id))
+
+                layout.addWidget(label)
+                layout.addStretch()
+                layout.addWidget(load_button)
+                layout.addWidget(delete_button)
                 self.list_layout.addWidget(frame)
 
+        def load_trap(self, moves_san: List[str]):
+            """Tells the main controller to load the moves and closes the dialog."""
+            self.on_trap_load(moves_san)
+            self.accept() # Închide dialogul după încărcare
+
         def delete_trap(self, trap_id: int):
-            reply = QMessageBox.question(self, "Confirm", "Delete this trap?",
+            """Deletes a single trap after confirmation."""
+            trap_to_delete = next((t for t in self.repo.get_all_traps() if t.id == trap_id), None)
+            if not trap_to_delete:
+                QMessageBox.warning(self, "Error", "Trap not found.")
+                self.populate_list()
+                return
+
+            confirm_text = f"Are you sure you want to delete this trap?\n\n<b>{trap_to_delete.name}</b>"
+            reply = QMessageBox.question(self, "Confirm Deletion", confirm_text,
                                          QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
                                          QMessageBox.StandardButton.No)
+            
             if reply == QMessageBox.StandardButton.Yes:
                 self.repo.delete_trap_by_id(trap_id)
                 self.on_trap_deleted()
@@ -1941,10 +2057,14 @@ class GameController:
         
         self.config = UIConfig()
         
+        # Crearea repository-ului va declanșa acum automat migrarea bazei de date, dacă este necesar.
         self.trap_repository = TrapRepository()
         self.queen_trap_repository = QueenTrapRepository()
+        
+        # Serviciile vor fi create DUPĂ ce repository-ul a asigurat structura corectă a DB.
         self.trap_service = TrapService(self.trap_repository)
         self.queen_trap_service = QueenTrapService(self.queen_trap_repository)
+        
         self.pgn_service = PGNImportService(self.trap_repository)
         self.settings_service = SettingsService()
         self.opening_db = OpeningDatabase()
@@ -1961,7 +2081,6 @@ class GameController:
         self.move_history_forward = []
         self.current_suggestions = []
         
-        # NOU: Atribut pentru a stoca numărul total de capcane potrivite
         self.total_matching_traps = 0
         
         print("[DEBUG INIT] GameController initialization complete! Will start game directly.")
@@ -2040,10 +2159,11 @@ class GameController:
         
         print("[DEBUG MAIN] Main loop ended")
         pygame.quit()
-
     
     def _start_game(self, color: chess.Color, is_recording: bool = False) -> None:
         """Starts a new game or a new recording session."""
+        
+        # Am mutat logica de `_start_recording` aici pentru a fi un singur punct de intrare
         if is_recording:
             print("[REC] New recording session started. Board is reset.")
         else:
@@ -2062,6 +2182,22 @@ class GameController:
             self._update_suggestions()
         else:
             self.current_suggestions = [] # Ascundem sugestiile în modul record
+
+    def _start_recording(self):
+            """Starts a new recording session by resetting the board and state."""
+            print("[REC] New recording session started. Board is reset.")
+            self.current_state = GameState(
+                board=chess.Board(),
+                current_player=self.current_state.current_player, # Păstrăm culoarea selectată
+                is_recording=True,
+                # Istoricele sunt goale la început
+                move_history=[], 
+                recording_history=[]
+            )
+            self.flipped = (self.current_state.current_player == chess.BLACK)
+            self.move_history_forward = []
+            self.current_suggestions = [] # Ascundem sugestiile
+            self._clear_highlights()
 
     def _clear_database(self):
         """Handles clearing the database using a non-blocking QMessageBox from PySide6."""
@@ -2196,7 +2332,6 @@ class GameController:
         else:
             self._try_make_move(self.current_state.selected_square, square)
 
-    
     def _handle_board_mouseup(self, pos: Tuple[int, int]) -> None:
         """Handle mouse up on the chess board to complete a move."""
         if not self.current_state.dragging_piece or self.current_state.selected_square is None:
@@ -2237,7 +2372,6 @@ class GameController:
         """Resets only the visual highlights on the board."""
         self.current_state.highlighted_squares = None
         self.current_state.highlight_color = None
-
 
     def _handle_board_click(self, pos: Tuple[int, int]) -> None:
         """Handle clicks on the chess board (legacy method - kept for compatibility)."""
@@ -2312,28 +2446,21 @@ class GameController:
             self._update_suggestions()
         
     def _update_suggestions(self) -> None:
-        """
-        Updates the list of suggestions and the total count of matching trap lines.
-        """
         if self.current_state.board.turn != self.current_state.current_player or self.current_state.is_recording:
             self.current_suggestions = []
             self.total_matching_traps = 0
             return
 
-        # Obținem sugestiile de la ambele servicii
         checkmate_suggs = self.trap_service.get_aggregated_suggestions(self.current_state)
-        queen_suggs = self.queen_trap_service.get_aggregated_suggestions(self.current_state)
+        custom_suggs = self.queen_trap_service.get_aggregated_suggestions(self.current_state)
         
-        # Combinăm și sortăm sugestiile de mutări unice
-        all_suggs = checkmate_suggs + queen_suggs
+        all_suggs = checkmate_suggs + custom_suggs
         all_suggs.sort(key=lambda s: (s.trap_type == 'checkmate', -s.trap_count))
         self.current_suggestions = all_suggs
         
-        # --- AICI ESTE CALULUL CORECT PENTRU NUMĂRUL TOTAL ---
-        # Numărăm totalul liniilor individuale, nu al sugestiilor unice
         total_checkmates = self.trap_service.count_matching_traps(self.current_state)
-        total_queens = self.queen_trap_service.count_matching_traps(self.current_state)
-        self.total_matching_traps = total_checkmates + total_queens
+        total_customs = self.queen_trap_service.count_matching_traps(self.current_state)
+        self.total_matching_traps = total_checkmates + total_customs
 
         print(f"[DEBUG] Updated suggestions. Unique moves: {len(all_suggs)}. Total matching lines: {self.total_matching_traps}")
 
@@ -2343,13 +2470,18 @@ class GameController:
             print("[MANAGE] Cannot manage traps: PySide6 (Qt) is not available.")
             return
 
-        # Callback care va fi apelat din manager când o capcană este ștearsă
         def on_trap_deleted_callback():
-            print("[CONTROLLER] A queen trap was deleted. Forcing service reload.")
+            print("[CONTROLLER] A custom trap was deleted. Forcing fast-cache service reload.")
             self.queen_trap_service.force_reload()
             self._update_suggestions()
 
-        dialog = QtQueenTrapManager(self.queen_trap_repository, on_trap_deleted_callback)
+        # --- MODIFICAREA AICI ---
+        # Pasăm și noul callback `on_trap_load`.
+        dialog = QtQueenTrapManager(
+            self.queen_trap_repository, 
+            on_trap_deleted_callback,
+            on_trap_load=self.load_moves_onto_board # Aici conectăm metoda
+        )
         dialog.exec()
     
     def _update_game_state(self) -> None:
@@ -2360,46 +2492,7 @@ class GameController:
             keys = pygame.key.get_pressed()
             if keys[pygame.K_RETURN]:
                 self._stop_recording()
-    
-    def _handle_action(self, action: str) -> None:
-        """Handle various game actions with context-aware recording."""
-        
-        allowed_in_recording = {"record", "main_menu", "one_back", "one_forward"}
-        if self.current_state.is_recording and action not in allowed_in_recording:
-            print(f"[REC] Action '{action}' disabled while recording.")
-            return
 
-        # --- Acțiuni Noi ---
-        if action == "play_as_white":
-            self._start_game(chess.WHITE)
-            return
-        if action == "play_as_black":
-            self._start_game(chess.BLACK)
-            return
-        if action == "db_info":
-            self._show_database_info()
-            return
-        # ------------------
-        
-        if action == "to_start": self._go_to_start()
-        elif action == "one_back": self._go_back_one()
-        elif action == "one_forward": self._go_forward_one()
-        elif action == "to_end": self._go_to_end()
-        elif action == "record":
-            if not self.current_state.is_recording:
-                self._start_game(self.current_state.current_player, is_recording=True) # Pornim un joc nou în mod record
-            else:
-                self._handle_stop_recording_request(self.current_state.recording_history)
-        elif action == "import_pgn": self._import_pgn_file()
-        elif action == "main_menu": 
-            self._start_game(self.current_state.current_player) # Main Menu acum resetează jocul
-        elif action.startswith("suggestion_"):
-            if not self.current_state.is_recording:
-                idx = int(action.split("_")[1])
-                if 0 <= idx < len(self.current_suggestions):
-                    self._select_suggestion(self.current_suggestions[idx])
-
-    
     def _select_suggestion(self, suggestion: MoveSuggestion):
         """Highlights the board based on a selected suggestion without making a move."""
         try:
@@ -2416,73 +2509,106 @@ class GameController:
         except ValueError:
             print(f"[DEBUG] Error parsing suggested move SAN: {suggestion.suggested_move}")
             self._clear_highlights()
-    
-    def _go_to_start(self) -> None:
-        """Go to the beginning of the game."""
-        new_board = chess.Board()
-        self.current_state = GameState(
-            board=new_board,
-            current_player=self.current_state.current_player,
-            is_recording=self.current_state.is_recording,
-            move_history=[],
-            selected_square=None,
-            dragging_piece=None,
-            drag_pos=None
-        )
-        # Reconstruim istoricul forward din istoricul complet anterior
-        full_history = self.current_state.move_history + self.move_history_forward
-        self.move_history_forward = full_history
-        
-        self._clear_highlights() # ADAUGARE: Curăță highlight-urile
-        self._update_suggestions()    
 
-    def _go_back_one(self) -> None:
-        """Go back one move in either normal play or recording mode."""
-        # --- Logica pentru modul de înregistrare ---
-        if self.current_state.is_recording:
-            if self.current_state.recording_history:
-                self.current_state.board.pop()
-                # Mutăm ultima mutare din istoricul de înregistrare în cel de "forward"
-                last_move_san = self.current_state.recording_history.pop()
-                self.move_history_forward.insert(0, last_move_san)
-                # Actualizăm și istoricul de afișare
-                self.current_state.move_history.pop()
-                print(f"[REC] Went back. Last move was: {last_move_san}")
+    def _go_to_start(self) -> None:
+        """Go to the beginning of the game, effectively resetting it."""
+        print("[DEBUG] 'Go to Start' pressed, resetting the game.")
+        # Acum, această metodă resetează complet jocul.
+        self._start_game(self.current_state.current_player)
+
+    def _handle_action(self, action: str) -> None:
+        """Handle various game actions based on the desired workflow."""
+
+        # --- Logica pentru butonul "Record" ---
+        # Aceasta este singura funcție a acestui buton.
+        if action == "record":
+            # Indiferent de starea curentă, încercăm să salvăm istoricul.
+            # Nu mai avem un "mod de înregistrare" separat.
+            print("[ACTION] 'Record' button pressed. Attempting to save current game line...")
+            self._handle_stop_recording_request(self.current_state.move_history)
             return
 
-        # --- Logica pentru modul de joc normal (neschimbată) ---
+        # --- Logica pentru butoanele de navigație și setări ---
+        # Aceste acțiuni sunt acum independente de "record".
+        
+        if action == "play_as_white":
+            self._start_game(chess.WHITE)
+        elif action == "play_as_black":
+            self._start_game(chess.BLACK)
+        elif action == "db_info":
+            self._show_database_info()
+        elif action == "to_start":
+            self._go_to_start()
+        elif action == "one_back":
+            self._go_back_one()
+        elif action == "one_forward":
+            self._go_forward_one()
+        elif action == "to_end":
+            self._go_to_end()
+        elif action == "import_pgn":
+            self._import_pgn_file()
+        elif action.startswith("suggestion_"):
+            idx = int(action.split("_")[1])
+            if 0 <= idx < len(self.current_suggestions):
+                self._select_suggestion(self.current_suggestions[idx])
+        
+        # Am eliminat complet acțiunea "reset_game" / "main_menu"
+
+    def _handle_stop_recording_request(self, moves_to_analyze: List[str]):
+        """
+        Handles a request to save a line, using the provided move list.
+        This method NEVER resets the board.
+        """
+        if not moves_to_analyze:
+            print("[REC] No moves to save. The game history is empty.")
+            if QT_AVAILABLE:
+                QMessageBox.information(None, "Nothing to Record", "Play some moves first before recording a trap.")
+            return
+
+        detected_type, winning_color = self._analyze_recorded_line(moves_to_analyze)
+
+        decision = None
+        if QT_AVAILABLE:
+            decision = QtSaveConfirmDialog.get_decision(detected_type, moves_to_analyze)
+        else:
+            # Fallback pentru testare fără Qt
+            decision = QtSaveConfirmDialog.SAVE
+
+        if decision == QtSaveConfirmDialog.SAVE:
+            print("[REC] User chose to save the trap.")
+            self._save_trap_logic(detected_type, winning_color, moves_to_analyze)
+            # După salvare, actualizăm sugestiile pentru poziția curentă.
+            # Asta e tot, nicio resetare.
+            self._update_suggestions()
+            
+        elif decision == QtSaveConfirmDialog.CANCEL:
+            print("[REC] Save action cancelled by user. Game continues.")
+            # Nu facem absolut nimic, jocul continuă normal.
+            
+        elif decision == QtSaveConfirmDialog.CONTINUE:
+            print("[REC] Save dialog 'Continue' selected. Game continues.")
+            # Nici aici nu facem nimic, jocul continuă normal.
+
+    def _go_back_one(self) -> None:
+        """Go back one move in the current game history."""
         if self.current_state.move_history:
             self.current_state.board.pop()
             self.move_history_forward.insert(0, self.current_state.move_history.pop())
             self._clear_highlights()
             self._update_suggestions()
-    
-    def _go_forward_one(self) -> None:
-        """Go forward one move in either normal play or recording mode."""
-        # --- Logica pentru modul de înregistrare ---
-        if self.current_state.is_recording:
-            if self.move_history_forward:
-                next_move_san = self.move_history_forward.pop(0)
-                try:
-                    move = self.current_state.board.parse_san(next_move_san)
-                    self.current_state.board.push(move)
-                    # Adăugăm mutarea înapoi în ambele istorice
-                    self.current_state.recording_history.append(next_move_san)
-                    self.current_state.move_history.append(next_move_san)
-                    print(f"[REC] Went forward. Move: {next_move_san}")
-                except ValueError:
-                    self.move_history_forward.insert(0, next_move_san)
-            return
 
-        # --- Logica pentru modul de joc normal (neschimbată) ---
+    def _go_forward_one(self) -> None:
+        """Go forward one move if available."""
         if self.move_history_forward:
             next_move_san = self.move_history_forward.pop(0)
             try:
                 move = self.current_state.board.parse_san(next_move_san)
-                self._make_move(move) # Re-folosim _make_move pentru a re-calcula totul corect
+                # Re-folosim _make_move pentru a menține consistența stării
+                self._make_move(move)
             except ValueError:
+                # Dacă mutarea e invalidă, o punem la loc pentru a nu o pierde
                 self.move_history_forward.insert(0, next_move_san)
-    
+ 
     def _go_to_end(self) -> None:
         """Go to the end of the game (the last known position)."""
         while self.move_history_forward:
@@ -2490,74 +2616,6 @@ class GameController:
         
         # Asigură-te că și la final, orice highlight este curățat
         self._clear_highlights()
-    
-    def _start_recording(self) -> None:
-        """Prepares the state for a new recording from scratch."""
-        print("[REC] New recording session started. Board is reset.")
-        self.current_state.is_recording = True
-        self.current_state.board.reset()
-        self.current_state.recording_history = []
-        self.current_state.move_history = []
-        self.move_history_forward = []
-        self.current_suggestions = []
-        self._clear_highlights()
-
-    def _handle_stop_recording_request(self, moves_to_analyze: List[str]):
-        """
-        Handles a request to save a line, using the provided move list.
-        """
-        if not moves_to_analyze:
-            print("[REC] No moves to save.")
-            self.current_state.is_recording = False
-            return
-
-        detected_type, winning_color = self._analyze_recorded_line(moves_to_analyze)
-
-        # Determinăm ce decizie să luăm (prin Qt sau consolă)
-        decision = None
-        if QT_AVAILABLE:
-            decision = QtSaveConfirmDialog.get_decision(detected_type, moves_to_analyze)
-        else:
-            # --- LOGICA DE FALLBACK PENTRU CONSOLĂ (COMPLETATĂ) ---
-            print("\n" + "="*30)
-            print(f"  POTENTIAL TRAP DETECTED")
-            print(f"  Type: {detected_type}")
-            print(f"  Moves: {' '.join(moves_to_analyze)}")
-            print("="*30)
-            
-            while decision is None:
-                choice = input("Action: [S]ave, [C]ancel, or co[N]tinue recording? ").lower()
-                if choice == 's':
-                    decision = QtSaveConfirmDialog.SAVE
-                elif choice == 'c':
-                    decision = QtSaveConfirmDialog.CANCEL
-                elif choice == 'n':
-                    decision = QtSaveConfirmDialog.CONTINUE
-                else:
-                    print("Invalid choice. Please enter 's', 'c', or 'n'.")
-
-        # Acum acționăm pe baza deciziei luate
-        if decision == QtSaveConfirmDialog.SAVE:
-            print("[REC] User chose to save the trap.")
-            self._save_trap_logic(detected_type, winning_color, moves_to_analyze)
-            # După salvare, cel mai sigur e să ne întoarcem la meniu
-            self._return_to_main_menu()
-
-        elif decision == QtSaveConfirmDialog.CANCEL:
-            print("[REC] User cancelled the save/recording.")
-            # Dacă eram în modul de înregistrare, îl oprim și mergem la meniu
-            if self.current_state.is_recording:
-                self._return_to_main_menu()
-            # Dacă doar am anulat salvarea unui joc normal, nu facem nimic, rămânem în joc
-                
-        elif decision == QtSaveConfirmDialog.CONTINUE:
-            # Această opțiune are sens doar dacă eram deja în modul de înregistrare
-            if self.current_state.is_recording:
-                print("[REC] Continuing recording...")
-            else:
-                # Dacă am încercat să salvăm un joc normal, "continue" nu face nimic
-                print("[REC] Save action cancelled.")
-        
 
     def _analyze_recorded_line(self, moves_san: List[str]) -> Tuple[str, Optional[chess.Color]]:
         board = chess.Board()
@@ -2608,32 +2666,37 @@ class GameController:
                 QMessageBox.information(None, "Not Saved", "The recorded line is not a recognized trap type.")
             return
 
-        # Toate capcanele custom, indiferent de tip, merg în sistemul 'queen_traps'
-        # Numele va reflecta tipul real
+        # Toate capcanele custom, indiferent de tip, merg în sistemul 'queen_traps' (cel rapid)
         trap_name = f"{detected_type.replace(' ', '')} ({moves[0]}...)"
         
-        # Pentru 'capture_square', folosim o valoare generică dacă e mat
+        # Pentru 'capture_square', folosim o valoare generică (0) dacă e mat,
+        # altfel calculăm pătrățelul reginei.
         capture_square = 0 
         if detected_type in ["Direct Queen Capture", "Royal Fork"]:
             final_board = chess.Board()
             for move_san in moves: 
-                final_board.push(final_board.parse_san(move_san.replace('#','').replace('+','')))
+                # Parsăm o versiune curată a mutării
+                clean_san = move_san.replace('#','').replace('+','')
+                final_board.push(final_board.parse_san(clean_san))
+            
             opponent_color = not winning_color
             queen_square_set = final_board.pieces(chess.QUEEN, opponent_color)
             if queen_square_set:
                 capture_square = queen_square_set.pop()
 
-        # Creăm obiectul și îl salvăm în repository-ul rapid
+        # Creăm obiectul cu noul câmp `trap_type`
         new_custom_trap = QueenTrap(
             name=trap_name, 
+            trap_type=detected_type, # Salvăm tipul real detectat
             moves=moves, 
             color=winning_color, 
             capture_square=capture_square
         )
         
+        # Salvăm în repository-ul rapid (queen_trap_repository)
         trap_id = self.queen_trap_repository.save_trap(new_custom_trap)
         
-        if trap_id != -1:
+        if trap_id != -1: # Verificăm dacă nu a fost un duplicat
             new_custom_trap.id = trap_id
             # Forțăm reîncărcarea serviciului rapid (queen trap service), care este instantaneu
             self.queen_trap_service.force_reload()
@@ -2702,7 +2765,6 @@ class GameController:
         else:
             print("[IMPORT] Folder selection cancelled.")
 
-
     def _run_database_audit(self, max_moves: int):
         """Orchestrates the database audit and refreshes the application state ONLY if changes were made."""
         print("[CONTROLLER] Starting database audit process...")
@@ -2741,42 +2803,145 @@ class GameController:
     def _show_database_info(self):
         """Collects and displays detailed database statistics in a Qt dialog."""
         if not QT_AVAILABLE:
-            print("[INFO] Cannot show stats: PySide6 (Qt) is not available.")
-            # Fallback pentru consolă
+            # Fallback consolă
             pgn_traps = self.trap_repository.get_total_trap_count()
             custom_traps = self.queen_trap_repository.get_total_trap_count()
-            print("\n--- DATABASE STATS ---")
-            print(f"  PGN Checkmate Traps: {pgn_traps}")
-            print(f"  Manually Recorded Traps: {custom_traps}")
-            print(f"  Total Traps: {pgn_traps + custom_traps}")
-            print("----------------------\n")
+            print(f"PGN Checkmate Traps: {pgn_traps}, Manually Recorded Traps: {custom_traps}")
             return
 
-        # Colectează datele folosind repository-urile
+        # Colectează datele
         pgn_checkmates = self.trap_repository.get_total_trap_count()
-        manually_recorded = self.queen_trap_repository.get_total_trap_count()
-        
-        # Numărăm specific capcanele de tip "Queen Hunt" din cele custom
         all_custom_traps = self.queen_trap_repository.get_all_traps()
-        queen_hunt_count = sum(1 for trap in all_custom_traps if 'Queen' in trap.name or 'Fork' in trap.name)
-        recorded_mates_count = manually_recorded - queen_hunt_count
+        manually_recorded = len(all_custom_traps)
+        
+        # --- AICI ESTE A DOUA CORECȚIE (pentru robustețe) ---
+        # Numărăm explicit fiecare categorie
+        recorded_mates_count = sum(1 for trap in all_custom_traps if trap.trap_type == 'Checkmate')
+        queen_hunt_count = manually_recorded - recorded_mates_count # Restul sunt de regină
         
         total_traps = pgn_checkmates + manually_recorded
         
-        # Formatează numerele pentru lizibilitate
+        # Construim dicționarul pentru afișare
         stats = {
-            "PGN Checkmate Library": f"{pgn_checkmates:_}".replace("_", " "),
-            "-----------------------------": "", # Separator vizual
-            "Manually Recorded Traps": f"{manually_recorded:_}".replace("_", " "),
-            "   - Queen Hunts / Forks": f"{queen_hunt_count:_}".replace("_", " "),
-            "   - Checkmates": f"{recorded_mates_count:_}".replace("_", " "),
-            "=============================": "", # Separator vizual
-            "Total Unique Traps": f"{total_traps:_}".replace("_", " "),
+            "PGN Checkmate Library": f"{pgn_checkmates:,}",
+            "separator1": "", 
+            "Manually Recorded Traps": f"{manually_recorded:,}",
+            "   - Queen Hunts / Forks": f"{queen_hunt_count:,}",
+            "   - Checkmates": f"<b>{recorded_mates_count:,}</b>",
+            "separator2": "",
+            "Total Unique Traps": f"<b>{total_traps:,}</b>"
         }
         
         # Creează și afișează dialogul
-        dialog = QtInfoDialog(stats)
+        dialog = QtInfoDialog(
+            stats,
+            on_export_pgn=self._handle_export_custom_checkmates,
+            on_delete_custom_mates=self._handle_delete_custom_checkmates
+        )
         dialog.exec()
+
+    def _handle_export_custom_checkmates(self):
+        """Exports all manually recorded checkmates to a PGN file."""
+        all_custom_traps = self.queen_trap_repository.get_all_traps()
+        
+        # Filtrăm doar capcanele de mat
+        checkmates_to_export = [trap for trap in all_custom_traps if trap.trap_type == 'Checkmate']
+        
+        if not checkmates_to_export:
+            QMessageBox.information(None, "No Checkmates", "No manually recorded checkmates found to export.")
+            return
+
+        # Pregătim datele pentru PGN
+        pgn_string = ""
+        game_database = chess.pgn.Game()
+        
+        for i, trap in enumerate(checkmates_to_export):
+            game = chess.pgn.Game()
+            game.headers["Event"] = "Custom Checkmate Export"
+            game.headers["Site"] = "Chess Trap Explorer"
+            game.headers["Date"] = time.strftime("%Y.%m.%d")
+            game.headers["Round"] = str(i + 1)
+            game.headers["White"] = "Player" if trap.color == chess.WHITE else "Opponent"
+            game.headers["Black"] = "Player" if trap.color == chess.BLACK else "Opponent"
+            game.headers["Result"] = "1-0" if trap.color == chess.WHITE else "0-1"
+            
+            board = chess.Board()
+            node = game
+            for move_san in trap.moves:
+                try:
+                    move = board.parse_san(move_san)
+                    node = node.add_variation(move)
+                    board.push(move)
+                except ValueError:
+                    print(f"Skipping invalid move '{move_san}' in trap {trap.name}")
+                    continue
+            
+            pgn_string += str(game) + "\n\n"
+
+        # Deschidem dialogul de salvare fișier
+        filepath, _ = QFileDialog.getSaveFileName(None, "Save Custom Checkmates PGN", "", "PGN Files (*.pgn)")
+
+        if filepath:
+            try:
+                with open(filepath, 'w', encoding='utf-8') as f:
+                    f.write(pgn_string)
+                QMessageBox.information(None, "Success", f"Successfully exported {len(checkmates_to_export)} checkmates to:\n{filepath}")
+            except Exception as e:
+                QMessageBox.critical(None, "Error", f"Failed to save the file: {e}")
+
+    def _handle_delete_custom_checkmates(self):
+        """Handles the deletion of manually recorded checkmates after user confirmation."""
+        reply = QMessageBox.question(None, "Confirm Deletion",
+                                     "Are you sure you want to delete all manually recorded checkmates?\n\nThis action cannot be undone. Make sure you have exported and imported them first.",
+                                     QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                                     QMessageBox.StandardButton.No)
+
+        if reply == QMessageBox.StandardButton.Yes:
+            deleted_count = self.queen_trap_repository.delete_checkmate_traps()
+            
+            if deleted_count > 0:
+                # CRUCIAL: Reîmprospătăm serviciul și sugestiile
+                self.queen_trap_service.force_reload()
+                self._update_suggestions()
+                QMessageBox.information(None, "Success", f"Successfully deleted {deleted_count} custom checkmate traps.")
+                # Închidem fereastra de statistici pentru a forța redeschiderea cu date actualizate
+                if self.qt_app.activeWindow():
+                    self.qt_app.activeWindow().accept()
+            else:
+                QMessageBox.information(None, "No Action", "No custom checkmates were found to delete.")
+
+    def load_moves_onto_board(self, moves_san: List[str]):
+        """
+        Clears the current game and loads a new sequence of moves onto the board.
+        This effectively starts a new game from the provided line.
+        """
+        print(f"[ACTION] Loading a new line onto the board: {' '.join(moves_san)}")
+        
+        # Începem un joc nou pentru a ne asigura că totul este curat
+        self._start_game(self.current_state.current_player)
+        
+        board = self.current_state.board
+        temp_history = []
+        
+        for move_san in moves_san:
+            try:
+                clean_san = move_san.replace('#', '').replace('+', '')
+                move = board.parse_san(clean_san)
+                board.push(move)
+                temp_history.append(move_san)
+            except ValueError as e:
+                print(f"[LOAD ERROR] Could not parse move '{move_san}'. Stopping load. Error: {e}")
+                QMessageBox.warning(None, "Load Error", f"Could not load the full line. Invalid move found: {move_san}")
+                break # Ne oprim dacă o mutare este invalidă
+
+        # Actualizăm starea jocului cu noua linie
+        self.current_state.move_history = temp_history
+        self.move_history_forward = [] # Nu există mutări "forward"
+        
+        # Curățăm highlight-urile și actualizăm sugestiile pentru noua poziție
+        self._clear_highlights()
+        self._update_suggestions()
+        print("[ACTION] Board position updated successfully.")
 
 def main():
     """Main entry point."""

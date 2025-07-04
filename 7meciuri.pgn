@@ -1,0 +1,70 @@
+[Event "Custom Checkmate Export"]
+[Site "Chess Trap Explorer"]
+[Date "2025.07.02"]
+[Round "1"]
+[White "Player"]
+[Black "Opponent"]
+[Result "1-0"]
+
+1. c4 e5 2. Nc3 Nc6 3. Nf3 g6 4. d4 exd4 5. Nd5 Bg7 6. Bg5 Nge7 7. Nxd4 Bxd4 8. Qxd4 Nxd4 9. Nf6+ Kf8 10. Bh6# 1-0
+
+[Event "Custom Checkmate Export"]
+[Site "Chess Trap Explorer"]
+[Date "2025.07.02"]
+[Round "2"]
+[White "Player"]
+[Black "Opponent"]
+[Result "1-0"]
+
+1. c4 e5 2. Nc3 Nc6 3. Nf3 g6 4. d4 exd4 5. Nd5 Bg7 6. Bg5 Nge7 7. Nxd4 Bxd4 8. Qxd4 O-O 9. Nf6+ Kh8 10. Ng4+ Kg8 11. Nh6# 1-0
+
+[Event "Custom Checkmate Export"]
+[Site "Chess Trap Explorer"]
+[Date "2025.07.02"]
+[Round "3"]
+[White "Player"]
+[Black "Opponent"]
+[Result "1-0"]
+
+1. e4 e5 2. Nf3 Nc6 3. d4 exd4 4. Ng5 Be7 5. Nxf7 Kxf7 6. Bc4+ Ke8 7. Qh5+ g6 8. Qd5 Ne5 9. Qxe5 Nh6 10. Qxh8+ Ng8 11. Qxg8+ Bf8 12. Qf7# 1-0
+
+[Event "Custom Checkmate Export"]
+[Site "Chess Trap Explorer"]
+[Date "2025.07.02"]
+[Round "4"]
+[White "Player"]
+[Black "Opponent"]
+[Result "1-0"]
+
+1. c4 e5 2. Nc3 Nc6 3. Nf3 g6 4. d4 exd4 5. Nd5 Bg7 6. Bg5 Nge7 7. Nxd4 Bxd4 8. Qxd4 O-O 9. Nf6+ Kh8 10. Ng4+ Nxd4 11. Bf6+ Kg8 12. Nh6# 1-0
+
+[Event "Custom Checkmate Export"]
+[Site "Chess Trap Explorer"]
+[Date "2025.07.02"]
+[Round "5"]
+[White "Player"]
+[Black "Opponent"]
+[Result "1-0"]
+
+1. e4 e5 2. f4 exf4 3. Nf3 g5 4. Nc3 g4 5. Ne5 Qh4+ 6. g3 fxg3 7. Qxg4 g2+ 8. Qxh4 gxh1=Q 9. Qh5 Be7 10. Nxf7 Nf6 11. Nd6+ Kd8 12. Qe8+ Rxe8 13. Nf7# 1-0
+
+[Event "Custom Checkmate Export"]
+[Site "Chess Trap Explorer"]
+[Date "2025.07.02"]
+[Round "6"]
+[White "Player"]
+[Black "Opponent"]
+[Result "1-0"]
+
+1. e4 e5 2. Nf3 Nc6 3. Bb5 d6 4. d4 Nf6 5. O-O Nxe4 6. d5 a6 7. Bd3 Nf6 8. dxc6 e4 9. Re1 d5 10. cxb7 Bxb7 11. Be2 exf3 12. Bb5# 1-0
+
+[Event "Custom Checkmate Export"]
+[Site "Chess Trap Explorer"]
+[Date "2025.07.02"]
+[Round "7"]
+[White "Player"]
+[Black "Opponent"]
+[Result "1-0"]
+
+1. e4 e5 2. Nf3 Nc6 3. Bb5 Nf6 4. O-O Nxe4 5. Re1 Nd6 6. Nxe5 Nxe5 7. Rxe5+ Be7 8. Nc3 Nxb5 9. Nd5 O-O 10. Nxe7+ Kh8 11. Qh5 Re8 12. Qxh7+ Kxh7 13. Rh5# 1-0
+
