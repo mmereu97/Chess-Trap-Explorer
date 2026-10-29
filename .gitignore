@@ -1,27 +1,35 @@
-# Fișiere specifice sistemului de operare
+# Local configuration (contains credentials / machine-specific paths)
+config.ini
+settings.json
+
+# OS files
 *.swp
 *~
 .DS_Store
+Thumbs.db
 
-# Fișiere generate de PyCharm/IDE
+# IDE / virtual environments
 .idea/
+.vscode/
 .venv/
 venv/
 __pycache__/
 *.pyc
 
-# Fișiere executabile și de build
+# Build output
 *.exe
 *.dll
 dist/
 build/
 
-# Fișiere de baze de date și temporare
+# Databases and caches (generated locally)
 *.db
 *.db-shm
 *.db-wal
 *.sqlite3
 *.cache
+eco.pgn
 
-# Foldere de backup (dacă nu vrei să le urmărești)
+# Local backups and work-in-progress copies
 backup/
+comasare/

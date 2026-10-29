@@ -1,0 +1,8 @@
+; Copy this file to config.ini and fill in your own PostgreSQL credentials.
+; config.ini is listed in .gitignore and must never be committed.
+[postgresql]
+host = localhost
+port = 5432
+dbname = chess_trap_db
+user = postgres
+password = CHANGE_ME

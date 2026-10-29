@@ -1,5 +1,6 @@
 pygame
+pygame-textinput
 python-chess
 PySide6
 pyperclip
-pygame-textinput
+psycopg2-binary

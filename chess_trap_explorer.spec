@@ -1,9 +1,9 @@
 # -*- mode: python ; coding: utf-8 -*-
 from PyInstaller.utils.hooks import collect_all
 
-datas = [('pieces', 'pieces'), ('traps.xlsx', '.')]
+datas = [('pieces', 'pieces')]
 binaries = []
-hiddenimports = ['pygame', 'chess', 'pandas', 'openpyxl', 'pyperclip', 'pygame_textinput']
+hiddenimports = ['pygame', 'chess', 'pyperclip', 'pygame_textinput', 'psycopg2', 'PySide6']
 tmp_ret = collect_all('pygame')
 datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
 
