@@ -1,136 +1,136 @@
 # ♟️ Chess Trap Trainer
 
-**Chess Trap Trainer** este o aplicație desktop avansată, dezvoltată în Python, concepută pentru a ajuta jucătorii de șah să învețe, să practice și să exploreze o varietate largă de capcane tactice și deschideri.
+**Chess Trap Trainer** is an advanced desktop application written in Python, designed to help chess players learn, practice and explore a wide variety of tactical traps and openings.
 
-![Screenshot aplicație](Capture.PNG) 
+![Application screenshot](Capture.PNG)
 
-## ✨ Funcționalități Principale
+## ✨ Key Features
 
-### 🎯 **Antrenament Inteligent și Contextual**
-- **Sistem Dual de Capcane**: Aplicația gestionează două tipuri de repertorii:
-    1.  **Biblioteca Principală (PGN)**: O bază de date masivă, populată prin scanarea a mii de partide, axată pe capcane care duc la șah-mat.
-    2.  **Repertoriul Custom (Înregistrat Manual)**: Capcanele tale personale, înregistrate direct în aplicație, care pot viza atât **șah-mat**, cât și **câștiguri materiale decisive** (ex: capturarea reginei, furci regale).
-- **Sugestii în Timp Real**: Pe măsură ce joci, aplicația îți arată cele mai promițătoare continuări din ambele repertorii, prioritizând capcanele custom.
-- **Diferențiere Vizuală Clară**:
-    - 🟪 **Mov**: Sugestii din repertoriul tău custom (ex: `[Queen Hunter]`).
-    - 🟦 **Albastru**: Sugestii din biblioteca principală de maturi.
-- **Evidențiere Tactică**:
-    - 🟥 **Roșu**: Evidențiază mutarea sugerată când selectezi o capcană din listă.
-    - 🟩 **Verde**: Evidențiază răspunsul așteptat al adversarului, ajutându-te să exersezi continuarea corectă.
-- **Recunoașterea Transpozițiilor**: Sistemul identifică poziția de pe tablă, nu doar secvența de mutări. Chiar dacă ajungi la o poziție printr-o ordine diferită de mutări, vei primi sugestiile corecte.
-- **Bază de Date a Deschiderilor**: Afișează în timp real numele deschiderii care se joacă (ex: "Sicilian: Najdorf") și recunoaște sisteme de joc precum "London System" sau "King's Indian Defense".
+### 🎯 **Smart, Context-Aware Training**
+- **Dual Trap System**: the app manages two kinds of repertoires:
+    1.  **Main Library (PGN)**: a massive database, populated by scanning thousands of games, focused on traps that lead to checkmate.
+    2.  **Custom Repertoire (Manually Recorded)**: your personal traps, recorded directly in the app, targeting both **checkmate** and **decisive material wins** (e.g. queen captures, royal forks).
+- **Real-Time Suggestions**: as you play, the app shows the most promising continuations from both repertoires, prioritising your custom traps.
+- **Clear Visual Differentiation**:
+    - 🟪 **Purple**: suggestions from your custom repertoire (e.g. `[Queen Hunter]`).
+    - 🟦 **Blue**: suggestions from the main checkmate library.
+- **Tactical Highlighting**:
+    - 🟥 **Red**: highlights the suggested move when you select a trap from the list.
+    - 🟩 **Green**: highlights the opponent's expected reply, helping you drill the correct continuation.
+- **Transposition Recognition**: the system identifies the position on the board, not just the move sequence. Even if you reach a position through a different move order, you still get the right suggestions.
+- **Opening Database**: displays the name of the opening being played in real time (e.g. "Sicilian: Najdorf") and recognises systems such as the "London System" or the "King's Indian Defense".
 
-### ✍️ **Mod de Înregistrare Flexibil și Puternic**
-- **Înregistrare Contextuală**: Butonul "Record" are funcționalitate duală:
-    1.  **De la Zero**: Pornește o sesiune de înregistrare pe o tablă goală pentru a introduce o linie nouă.
-    2.  **Salvarea unui Joc Curent**: Dacă ești în mijlocul unui joc interesant, poți apăsa "Record" pentru a salva direct istoricul partidei curente ca o nouă capcană.
-- **Analiză Automată**: La finalul înregistrării, sistemul detectează automat tipul de capcană:
-    - Șah-mat (`Checkmate`)
-    - Captură directă de regină (`Direct Queen Capture`)
-    - Furcă regală (rege + regină) (`Royal Fork`)
-- **Control Total**: Un dialog de confirmare îți permite să **Salvezi**, să **Anulezi** sau să **Continui** înregistrarea.
-- **Navigare în Timpul Înregistrării**: Poți folosi butoanele de `back` și `forward` pentru a corecta greșeli în timpul înregistrării, fără a o lua de la capăt.
+### ✍️ **Flexible, Powerful Recording Mode**
+- **Contextual Recording**: the "Record" button has dual functionality:
+    1.  **From Scratch**: starts a recording session on an empty board to enter a new line.
+    2.  **Saving the Current Game**: if you are in the middle of an interesting game, press "Record" to save the current game history directly as a new trap.
+- **Automatic Analysis**: when recording ends, the system automatically detects the trap type:
+    - `Checkmate`
+    - `Direct Queen Capture`
+    - `Royal Fork` (king + queen)
+- **Full Control**: a confirmation dialog lets you **Save**, **Cancel** or **Continue** recording.
+- **Navigation While Recording**: use the `back` and `forward` buttons to fix mistakes mid-recording without starting over.
 
-### 🗃️ **Management Avansat al Datelor**
-- **Flux de Lucru Fără Blocaje**: Salvarea capcanelor custom este **instantanee**. Adăugarea se face dinamic în memoria aplicației, fără a bloca interfața.
-- **Import Masiv de PGN-uri**: Importă zeci de mii de capcane de mat din fișiere PGN (inclusiv de pe Lichess, chess.com, etc.). Procesul este extrem de rapid, folosind toate nucleele procesorului.
-- **Gestionare Bază de Date**:
-    - **Import**: Dintr-un singur fișier PGN sau dintr-un folder întreg.
-    - **Audit DB**: Curăță și repară biblioteca principală (elimină duplicate, corectează culorile, șterge intrările invalide).
-    - **Manage Custom Traps**: O interfață dedicată pentru a vizualiza și șterge selectiv capcanele înregistrate manual.
-    - **Database Info**: O fereastră de statistici care afișează separat numărul de capcane din bibliotecă și cele din repertoriul tău custom.
-- **Caching Inteligent pe Două Niveluri**:
-    - `trap_index.cache`: Cache-ul mare pentru biblioteca PGN. Se reconstruiește (proces lent) doar după un import sau audit.
-    - `queen_trap_index.cache`: Cache-ul mic și rapid pentru capcanele custom. Se reconstruiește **instantaneu** la fiecare modificare.
+### 🗃️ **Advanced Data Management**
+- **Non-Blocking Workflow**: saving custom traps is **instant**. New traps are added dynamically in memory, without freezing the UI.
+- **Bulk PGN Import**: import tens of thousands of mate traps from PGN files (including Lichess, chess.com exports, etc.). The process is extremely fast, using every CPU core.
+- **Database Management**:
+    - **Import**: from a single PGN file or an entire folder.
+    - **Audit DB**: cleans and repairs the main library (removes duplicates, fixes colours, deletes invalid entries).
+    - **Manage Custom Traps**: a dedicated interface to view and selectively delete manually recorded traps.
+    - **Database Info**: a statistics window showing library traps and custom-repertoire traps separately.
+- **Smart Two-Level Caching**:
+    - `trap_index.cache`: the large cache for the PGN library. Rebuilt (a slow process) only after an import or audit.
+    - `queen_trap_index.cache`: the small, fast cache for custom traps. Rebuilt **instantly** on every change.
 
-## 🛠️ Arhitectură Software
+## 🛠️ Software Architecture
 
-Aplicația este construită folosind principii de **Clean Architecture**, separând clar responsabilitățile în straturi distincte pentru o mentenanță și extindere ușoară:
-- **UI (Interfață Utilizator):** `Renderer`, `InputHandler`, și clase `Qt...` pentru ferestrele de dialog.
-- **Controller (`GameController`):** Ordonează fluxul de date și gestionează starea aplicației.
-- **Services (Servicii):** `TrapService` (bibliotecă PGN), `QueenTrapService` (capcane custom), `PGNImportService`, `DatabaseAuditor`, `OpeningDatabase`.
-- **Repository (`TrapRepository`, `QueenTrapRepository`):** Strat de abstractizare peste tabelele din baza de date SQLite.
-- **Entities (Entități):** `GameState`, `ChessTrap`, `QueenTrap`, `MoveSuggestion`, etc.
+The application follows **Clean Architecture** principles, with responsibilities clearly separated into layers for easy maintenance and extension:
+- **UI:** `Renderer`, `InputHandler`, and `Qt...` classes for dialog windows.
+- **Controller (`GameController`):** orchestrates the data flow and manages application state.
+- **Services:** `TrapService` (PGN library), `QueenTrapService` (custom traps), `PGNImportService`, `DatabaseAuditor`, `OpeningDatabase`.
+- **Repositories (`TrapRepository`, `QueenTrapRepository`):** abstraction layer over the SQLite database tables.
+- **Entities:** `GameState`, `ChessTrap`, `QueenTrap`, `MoveSuggestion`, etc.
 
-## 🚀 Instalare
+## 🚀 Installation
 
-Pentru a rula acest proiect, vei avea nevoie de Python 3.8 sau o versiune mai nouă.
+You will need Python 3.8 or newer.
 
-1.  **Clonează repository-ul:**
+1.  **Clone the repository:**
     ```bash
-    git clone https://github.com/your-username/chess-trap-trainer.git
+    git clone https://github.com/mmereu97/chess-trap-trainer.git
     cd chess-trap-trainer
     ```
 
-2.  **Creează un mediu virtual (recomandat):**
+2.  **Create a virtual environment (recommended):**
     ```bash
     python -m venv venv
     ```
-    *   Pe Windows, activează-l cu: `.\venv\Scripts\activate`
-    *   Pe macOS/Linux, activează-l cu: `source venv/bin/activate`
+    *   On Windows, activate it with: `.\venv\Scripts\activate`
+    *   On macOS/Linux, activate it with: `source venv/bin/activate`
 
-3.  **Instalează dependențele:**
-    Fișierul `requirements.txt` conține toate pachetele necesare.
+3.  **Install the dependencies:**
+    `requirements.txt` lists everything needed.
     ```bash
     pip install -r requirements.txt
     ```
 
-4.  **Imagini piese (opțional):**
-    Asigură-te că ai un folder numit `pieces` în directorul rădăcină, care conține imaginile pieselor de șah în format PNG (ex: `wp.png` pentru pion alb, `bn.png` pentru cal negru). Dacă folderul sau imaginile lipsesc, programul va afișa piese simple, geometrice.
+4.  **Piece images (optional):**
+    Make sure there is a `pieces` folder in the root directory containing the chess piece images as PNGs (e.g. `wp.png` for the white pawn, `bn.png` for the black knight). If the folder or images are missing, the program falls back to simple geometric pieces.
 
-### 📁 Structura Proiectului
+### 📁 Project Structure
 ```
 chess-trap-trainer/
-├── Chess_trap_explorer.py  # Scriptul principal al aplicației
-├── chess_traps.db          # Baza de date SQLite (se creează automat)
-├── trap_index.cache        # Cache pentru biblioteca PGN (se creează automat)
-├── queen_trap_index.cache  # Cache pentru capcanele custom (se creează automat)
-├── requirements.txt        # Lista de dependențe
-├── pieces/                 # Folder cu imaginile pieselor
+├── Chess_trap_explorer.py  # Main application script
+├── chess_traps.db          # SQLite database (created automatically)
+├── trap_index.cache        # PGN library cache (created automatically)
+├── queen_trap_index.cache  # Custom trap cache (created automatically)
+├── requirements.txt        # Dependency list
+├── pieces/                 # Chess piece images
 │   ├── wK.png, wQ.png, ...
 │   └── bK.png, bQ.png, ...
 └── README.md
 ```
 
-## 📖 Utilizare
+## 📖 Usage
 
-Pentru a porni aplicația, rulează scriptul principal:
+Start the application by running the main script:
 ```bash
 python Chess_trap_explorer.py
 ```
 
-### Flux de lucru recomandat:
+### Recommended workflow:
 
-1.  **Populează Biblioteca Principală (Opțional):** Dacă dorești un repertoriu vast de maturi, mergi la `Controls` -> `Import / Audit`. Selectează un fișier PGN sau un folder și pornește importul.
-2.  **Începe Antrenamentul:** Aplicația pornește direct într-un joc. Folosește butonul "Play as White/Black" pentru a schimba culoarea. Butonul "Reset Game" începe o partidă nouă cu aceeași culoare.
-3.  **Explorează și Învață:**
-    *   Fă mutări pe tablă.
-    *   Panoul din dreapta îți va arăta sugestii, cu cele custom (mov) având prioritate.
-    *   Click pe o sugestie pentru a o evidenția pe tablă. Fă mutarea și observă highlight-ul verde care indică răspunsul probabil al adversarului.
-4.  **Creează-ți Repertoriul:**
-    *   Apasă "Record New Trap" pentru a intra în modul de înregistrare pe o tablă goală.
-    *   Joacă linia dorită (poți folosi butoanele de navigație pentru a corecta).
-    *   Apasă "Confirm/Stop" și alege să salvezi. Capcana va fi disponibilă instantaneu.
-    *   Dacă ai jucat o linie interesantă într-un joc normal, apasă "Record New Trap" pentru a o salva direct.
+1.  **Populate the Main Library (optional):** for a large checkmate repertoire, go to `Controls` -> `Import / Audit`, select a PGN file or folder and start the import.
+2.  **Start Training:** the app opens straight into a game. Use "Play as White/Black" to switch colours; "Reset Game" starts a new game with the same colour.
+3.  **Explore and Learn:**
+    *   Make moves on the board.
+    *   The right-hand panel shows suggestions, with custom ones (purple) taking priority.
+    *   Click a suggestion to highlight it on the board. Make the move and watch the green highlight showing the opponent's likely reply.
+4.  **Build Your Repertoire:**
+    *   Press "Record New Trap" to enter recording mode on an empty board.
+    *   Play the line you want (use the navigation buttons to correct mistakes).
+    *   Press "Confirm/Stop" and choose to save. The trap is available instantly.
+    *   Played an interesting line in a normal game? Press "Record New Trap" to save it directly.
 
-## 📦 Dependențe
+## 📦 Dependencies
 
-Proiectul se bazează pe următoarele biblioteci Python:
+The project relies on the following Python libraries:
 
-*   `pygame`: Pentru motorul grafic și interfața principală a tablei de șah.
-*   `python-chess`: Pentru toată logica de șah (mutări, validări, PGN, FEN).
-*   `PySide6`: Pentru ferestrele de dialog native (import, mesaje de confirmare, statistici).
-*   `pyperclip`: Pentru funcționalitatea butonului "Copy PGN".
+*   `pygame`: the graphics engine and main chessboard interface.
+*   `python-chess`: all chess logic (moves, validation, PGN, FEN).
+*   `PySide6`: native dialog windows (import, confirmations, statistics).
+*   `pyperclip`: the "Copy PGN" button.
 
-## 🤝 Contribuții
+## 🤝 Contributing
 
-Contribuțiile sunt binevenite! Te rog să respecți următorul flux de lucru:
-1.  **Fork** acest repository.
-2.  **Creează** o nouă branch pentru funcționalitatea ta (`git checkout -b feature/NumeFeature`).
-3.  **Commit** modificările tale (`git commit -am 'Add some feature'`).
-4.  **Push** către branch (`git push origin feature/NumeFeature`).
-5.  **Deschide** un Pull Request.
+Contributions are welcome! Please follow this workflow:
+1.  **Fork** this repository.
+2.  **Create** a branch for your feature (`git checkout -b feature/FeatureName`).
+3.  **Commit** your changes (`git commit -am 'Add some feature'`).
+4.  **Push** the branch (`git push origin feature/FeatureName`).
+5.  **Open** a Pull Request.
 
 ---
 
-**Mult succes la șah!**
+**Good luck at the board!**
